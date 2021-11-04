@@ -122,7 +122,8 @@ Note that this check is not performed in case of :ref:`low-level calls <address_
 operate on addresses rather than contract instances.
 
 .. note::
-    Be careful when using high-level calls to precompiled contracts,
+    Be careful when using high-level calls to
+    :ref:`precompiled contracts <precompiledContracts>`,
     since the compiler considers them non-existing according to the
     above logic even though they execute code and can return data.
 
