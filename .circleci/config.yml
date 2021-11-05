@@ -1177,7 +1177,6 @@ workflows:
           name: t_ems_compile_ext_gnosis
           project: gnosis
           compile_only: 1
-          nodejs_version: '14'
       - t_ems_ext:
           <<: *workflow_emscripten
           name: t_ems_compile_ext_zeppelin
@@ -1194,8 +1193,8 @@ workflows:
           <<: *workflow_emscripten
           name: t_ems_test_ext_gnosis
           project: gnosis
-          # NOTE: Tests do not start on node.js 14 ("ganache-cli exited early with code 1").
-          nodejs_version: '12'
+          # NOTE: Tests crash on nodejs 17: "Error: error:0308010C:digital envelope routines::unsupported"
+          nodejs_version: '16'
       - t_ems_ext:
           <<: *workflow_emscripten
           name: t_ems_test_ext_zeppelin
