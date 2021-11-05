@@ -1194,7 +1194,6 @@ workflows:
           name: t_ems_compile_ext_ens
           project: ens
           compile_only: 1
-          nodejs_version: '16'
 
       # FIXME: Gnosis tests are pretty flaky right now. They often fail on CircleCI due to random ProviderError
       # and there are also other less frequent problems. See https://github.com/gnosis/safe-contracts/issues/216.
@@ -1220,6 +1219,7 @@ workflows:
           <<: *workflow_emscripten
           name: t_ems_test_ext_ens
           project: ens
+          # NOTE: Tests crash on nodejs 17: "Error: error:0308010C:digital envelope routines::unsupported"
           nodejs_version: '16'
 
       # Windows build and tests
