@@ -34,9 +34,14 @@ add_library(yul
 	AssemblyStack.cpp
 	CompilabilityChecker.cpp
 	CompilabilityChecker.h
+	ControlFlowSideEffects.h
+	ControlFlowSideEffectsCollector.cpp
+	ControlFlowSideEffectsCollector.h
 	Dialect.cpp
 	Dialect.h
 	Exceptions.h
+	FunctionReferenceResolver.cpp
+	FunctionReferenceResolver.h
 	Object.cpp
 	Object.h
 	ObjectParser.cpp
@@ -53,6 +58,9 @@ add_library(yul
 	backends/evm/AsmCodeGen.h
 	backends/evm/ConstantOptimiser.cpp
 	backends/evm/ConstantOptimiser.h
+	backends/evm/ControlFlowGraph.h
+	backends/evm/ControlFlowGraphBuilder.cpp
+	backends/evm/ControlFlowGraphBuilder.h
 	backends/evm/EthAssemblyAdapter.cpp
 	backends/evm/EthAssemblyAdapter.h
 	backends/evm/EVMCodeTransform.cpp
@@ -65,6 +73,11 @@ add_library(yul
 	backends/evm/EVMMetrics.h
 	backends/evm/NoOutputAssembly.h
 	backends/evm/NoOutputAssembly.cpp
+	backends/evm/OptimizedEVMCodeTransform.cpp
+	backends/evm/OptimizedEVMCodeTransform.h
+	backends/evm/StackHelpers.h
+	backends/evm/StackLayoutGenerator.cpp
+	backends/evm/StackLayoutGenerator.h
 	backends/evm/VariableReferenceCounter.h
 	backends/evm/VariableReferenceCounter.cpp
 	backends/wasm/EVMToEwasmTranslator.cpp
@@ -162,6 +175,8 @@ add_library(yul
 	optimiser/ReasoningBasedSimplifier.h
 	optimiser/RedundantAssignEliminator.cpp
 	optimiser/RedundantAssignEliminator.h
+	optimiser/RedundantStoreBase.cpp
+	optimiser/RedundantStoreBase.h
 	optimiser/Rematerialiser.cpp
 	optimiser/Rematerialiser.h
 	optimiser/SMTSolver.cpp
@@ -204,4 +219,4 @@ add_library(yul
 	optimiser/VarNameCleaner.h
 )
 
-target_link_libraries(yul PUBLIC evmasm solutil langutil smtutil)
+target_link_libraries(yul PUBLIC evmasm solutil langutil smtutil fmt::fmt-header-only)

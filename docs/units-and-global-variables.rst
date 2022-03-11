@@ -9,7 +9,8 @@ Ether Units
 
 A literal number can take a suffix of ``wei``, ``gwei`` or ``ether`` to specify a subdenomination of Ether, where Ether numbers without a postfix are assumed to be Wei.
 
-::
+.. code-block:: solidity
+    :force:
 
     assert(1 wei == 1);
     assert(1 gwei == 1e9);
@@ -29,11 +30,11 @@ Suffixes like ``seconds``, ``minutes``, ``hours``, ``days`` and ``weeks``
 after literal numbers can be used to specify units of time where seconds are the base
 unit and units are considered naively in the following way:
 
- * ``1 == 1 seconds``
- * ``1 minutes == 60 seconds``
- * ``1 hours == 60 minutes``
- * ``1 days == 24 hours``
- * ``1 weeks == 7 days``
+* ``1 == 1 seconds``
+* ``1 minutes == 60 seconds``
+* ``1 hours == 60 minutes``
+* ``1 days == 24 hours``
+* ``1 weeks == 7 days``
 
 Take care if you perform calendar calculations using these units, because
 not every year equals 365 days and not even every day has 24 hours
@@ -45,7 +46,9 @@ library has to be updated by an external oracle.
     The suffix ``years`` has been removed in version 0.5.0 due to the reasons above.
 
 These suffixes cannot be applied to variables. For example, if you want to
-interpret a function parameter in days, you can in the following way::
+interpret a function parameter in days, you can in the following way:
+
+.. code-block:: solidity
 
     function f(uint start, uint daysAfter) public {
         if (block.timestamp >= start + daysAfter * 1 days) {
@@ -69,6 +72,7 @@ Block and Transaction Properties
 --------------------------------
 
 - ``blockhash(uint blockNumber) returns (bytes32)``: hash of the given block when ``blocknumber`` is one of the 256 most recent blocks; otherwise returns zero
+- ``block.basefee`` (``uint``): current block's base fee (`EIP-3198 <https://eips.ethereum.org/EIPS/eip-3198>`_ and `EIP-1559 <https://eips.ethereum.org/EIPS/eip-1559>`_)
 - ``block.chainid`` (``uint``): current chain id
 - ``block.coinbase`` (``address payable``): current block miner's address
 - ``block.difficulty`` (``uint``): current block difficulty
@@ -87,6 +91,12 @@ Block and Transaction Properties
     The values of all members of ``msg``, including ``msg.sender`` and
     ``msg.value`` can change for every **external** function call.
     This includes calls to library functions.
+
+.. note::
+    When contracts are evaluated off-chain rather than in context of a transaction included in a
+    block, you should not assume that ``block.*`` and ``tx.*`` refer to values from any specific
+    block or transaction. These values are provided by the EVM implementation that executes the
+    contract and can be arbitrary.
 
 .. note::
     Do not rely on ``block.timestamp`` or ``blockhash`` as a source of randomness,

@@ -24,11 +24,14 @@
 #include <libevmasm/LinkerObject.h>
 #include <libevmasm/Exceptions.h>
 
+#include <liblangutil/DebugInfoSelection.h>
 #include <liblangutil/EVMVersion.h>
 
 #include <libsolutil/Common.h>
 #include <libsolutil/Assertions.h>
 #include <libsolutil/Keccak256.h>
+
+#include <libsolidity/interface/OptimiserSettings.h>
 
 #include <json/json.h>
 
@@ -62,7 +65,7 @@ public:
 	AssemblyItem newPushImmutable(std::string const& _identifier);
 	AssemblyItem newImmutableAssignment(std::string const& _identifier);
 
-	AssemblyItem const& append(AssemblyItem const& _i);
+	AssemblyItem const& append(AssemblyItem _i);
 	AssemblyItem const& append(bytes const& _data) { return append(newData(_data)); }
 
 	template <class T> Assembly& operator<<(T const& _d) { append(_d); return *this; }
@@ -92,7 +95,7 @@ public:
 	void pushSubroutineOffset(size_t _subRoutine) { append(AssemblyItem(PushSub, _subRoutine)); }
 
 	/// Appends @a _data literally to the very end of the bytecode.
-	void appendAuxiliaryDataToEnd(bytes const& _data) { m_auxiliaryData += _data; }
+	void appendToAuxiliaryData(bytes const& _data) { m_auxiliaryData += _data; }
 
 	/// Returns the assembly items.
 	AssemblyItems const& items() const { return m_items; }
@@ -124,7 +127,7 @@ public:
 		langutil::EVMVersion evmVersion;
 		/// This specifies an estimate on how often each opcode in this assembly will be executed,
 		/// i.e. use a small value to optimise for size and a large value to optimise for runtime gas usage.
-		size_t expectedExecutionsPerDeployment = 200;
+		size_t expectedExecutionsPerDeployment = frontend::OptimiserSettings{}.expectedExecutionsPerDeployment;
 	};
 
 	/// Modify and return the current assembly such that creation and execution gas usage
@@ -140,10 +143,12 @@ public:
 
 	/// Create a text representation of the assembly.
 	std::string assemblyString(
+		langutil::DebugInfoSelection const& _debugInfoSelection = langutil::DebugInfoSelection::Default(),
 		StringMap const& _sourceCodes = StringMap()
 	) const;
 	void assemblyStream(
 		std::ostream& _out,
+		langutil::DebugInfoSelection const& _debugInfoSelection = langutil::DebugInfoSelection::Default(),
 		std::string const& _prefix = "",
 		StringMap const& _sourceCodes = StringMap()
 	) const;
@@ -163,9 +168,9 @@ protected:
 	/// Does the same operations as @a optimise, but should only be applied to a sub and
 	/// returns the replaced tags. Also takes an argument containing the tags of this assembly
 	/// that are referenced in a super-assembly.
-	std::map<u256, u256> optimiseInternal(OptimiserSettings const& _settings, std::set<size_t> _tagsReferencedFromOutside);
+	std::map<u256, u256> const& optimiseInternal(OptimiserSettings const& _settings, std::set<size_t> _tagsReferencedFromOutside);
 
-	unsigned bytesRequired(unsigned subTagSize) const;
+	unsigned codeSize(unsigned subTagSize) const;
 
 private:
 	static Json::Value createJsonValue(
@@ -207,6 +212,10 @@ protected:
 	/// Map from a vector representing a path to a particular sub assembly to sub assembly id.
 	/// This map is used only for sub-assemblies which are not direct sub-assemblies (where path is having more than one value).
 	std::map<std::vector<size_t>, size_t> m_subPaths;
+
+	/// Contains the tag replacements relevant for super-assemblies.
+	/// If set, it means the optimizer has run and we will not run it again.
+	std::optional<std::map<u256, u256>> m_tagReplacements;
 
 	mutable LinkerObject m_assembledObject;
 	mutable std::vector<size_t> m_tagPositionsInBytecode;

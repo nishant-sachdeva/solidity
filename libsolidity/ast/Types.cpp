@@ -41,11 +41,10 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/split.hpp>
-#include <boost/range/adaptor/sliced.hpp>
-#include <boost/range/algorithm/copy.hpp>
 
 #include <range/v3/view/enumerate.hpp>
 #include <range/v3/view/reverse.hpp>
+#include <range/v3/view/tail.hpp>
 #include <range/v3/view/transform.hpp>
 
 #include <limits>
@@ -1135,7 +1134,7 @@ IntegerType const* RationalNumberType::integerType() const
 		return nullptr;
 	else
 		return TypeProvider::integer(
-			max(util::bytesRequired(value), 1u) * 8,
+			max(numberEncodingSize(value), 1u) * 8,
 			negative ? IntegerType::Modifier::Signed : IntegerType::Modifier::Unsigned
 		);
 }
@@ -1169,7 +1168,7 @@ FixedPointType const* RationalNumberType::fixedPointType() const
 	if (v > u256(-1))
 		return nullptr;
 
-	unsigned totalBits = max(util::bytesRequired(v), 1u) * 8;
+	unsigned totalBits = max(numberEncodingSize(v), 1u) * 8;
 	solAssert(totalBits <= 256, "");
 
 	return TypeProvider::fixedPoint(
@@ -2533,6 +2532,42 @@ unsigned EnumType::memberValue(ASTString const& _member) const
 	solAssert(false, "Requested unknown enum value " + _member);
 }
 
+Type const& UserDefinedValueType::underlyingType() const
+{
+	Type const* type = m_definition.underlyingType()->annotation().type;
+	solAssert(type, "");
+	solAssert(type->category() != Category::UserDefinedValueType, "");
+	return *type;
+}
+
+string UserDefinedValueType::richIdentifier() const
+{
+	return "t_userDefinedValueType" + parenthesizeIdentifier(m_definition.name()) + to_string(m_definition.id());
+}
+
+bool UserDefinedValueType::operator==(Type const& _other) const
+{
+	if (_other.category() != category())
+		return false;
+	UserDefinedValueType const& other = dynamic_cast<UserDefinedValueType const&>(_other);
+	return other.definition() == definition();
+}
+
+string UserDefinedValueType::toString(bool /* _short */) const
+{
+	return *definition().annotation().canonicalName;
+}
+
+string UserDefinedValueType::canonicalName() const
+{
+	return *definition().annotation().canonicalName;
+}
+
+vector<tuple<string, Type const*>> UserDefinedValueType::makeStackItems() const
+{
+	return underlyingType().stackItems();
+}
+
 BoolResult TupleType::isImplicitlyConvertibleTo(Type const& _other) const
 {
 	if (auto tupleType = dynamic_cast<TupleType const*>(&_other))
@@ -2884,6 +2919,8 @@ string FunctionType::richIdentifier() const
 	case Kind::GasLeft: id += "gasleft"; break;
 	case Kind::Event: id += "event"; break;
 	case Kind::Error: id += "error"; break;
+	case Kind::Wrap: id += "wrap"; break;
+	case Kind::Unwrap: id += "unwrap"; break;
 	case Kind::SetGas: id += "setgas"; break;
 	case Kind::SetValue: id += "setvalue"; break;
 	case Kind::BlockHash: id += "blockhash"; break;
@@ -3039,10 +3076,7 @@ u256 FunctionType::storageSize() const
 
 bool FunctionType::leftAligned() const
 {
-	if (m_kind == Kind::External)
-		return true;
-	else
-		solAssert(false, "Alignment property of non-exportable function type requested.");
+	return m_kind == Kind::External;
 }
 
 unsigned FunctionType::storageBytes() const
@@ -3467,7 +3501,9 @@ bool FunctionType::isPure() const
 		m_kind == Kind::ABIEncodeWithSelector ||
 		m_kind == Kind::ABIEncodeWithSignature ||
 		m_kind == Kind::ABIDecode ||
-		m_kind == Kind::MetaType;
+		m_kind == Kind::MetaType ||
+		m_kind == Kind::Wrap ||
+		m_kind == Kind::Unwrap;
 }
 
 TypePointers FunctionType::parseElementaryTypeVector(strings const& _types)
@@ -3694,7 +3730,7 @@ MemberList::MemberMap TypeType::nativeMembers(ASTNode const* _currentScope) cons
 			auto bases = contract.annotation().linearizedBaseContracts;
 			solAssert(bases.size() >= 1, "linearizedBaseContracts should at least contain the most derived contract.");
 			// `sliced(1, ...)` ignores the most derived contract, which should not be searchable from `super`.
-			for (ContractDefinition const* base: bases | boost::adaptors::sliced(1, bases.size()))
+			for (ContractDefinition const* base: bases | ranges::views::tail)
 				for (FunctionDefinition const* function: base->definedFunctions())
 				{
 					if (!function->isVisibleInDerivedContracts() || !function->isImplemented())
@@ -3753,6 +3789,34 @@ MemberList::MemberMap TypeType::nativeMembers(ASTNode const* _currentScope) cons
 		auto enumType = TypeProvider::enumType(enumDef);
 		for (ASTPointer<EnumValue> const& enumValue: enumDef.members())
 			members.emplace_back(enumValue.get(), enumType);
+	}
+	else if (m_actualType->category() == Category::UserDefinedValueType)
+	{
+		auto& userDefined = dynamic_cast<UserDefinedValueType const&>(*m_actualType);
+		members.emplace_back(
+			"wrap",
+			TypeProvider::function(
+				TypePointers{&userDefined.underlyingType()},
+				TypePointers{&userDefined},
+				strings{string{}},
+				strings{string{}},
+				FunctionType::Kind::Wrap,
+				false, /*_arbitraryParameters */
+				StateMutability::Pure
+			)
+		);
+		members.emplace_back(
+			"unwrap",
+			TypeProvider::function(
+				TypePointers{&userDefined},
+				TypePointers{&userDefined.underlyingType()},
+				strings{string{}},
+				strings{string{}},
+				FunctionType::Kind::Unwrap,
+				false, /* _arbitraryParameters */
+				StateMutability::Pure
+			)
+		);
 	}
 	else if (
 		auto const* arrayType = dynamic_cast<ArrayType const*>(m_actualType);
@@ -3892,7 +3956,8 @@ MemberList::MemberMap MagicType::nativeMembers(ASTNode const*) const
 			{"difficulty", TypeProvider::uint256()},
 			{"number", TypeProvider::uint256()},
 			{"gaslimit", TypeProvider::uint256()},
-			{"chainid", TypeProvider::uint256()}
+			{"chainid", TypeProvider::uint256()},
+			{"basefee", TypeProvider::uint256()}
 		});
 	case Kind::Message:
 		return MemberList::MemberMap({
@@ -3960,9 +4025,10 @@ MemberList::MemberMap MagicType::nativeMembers(ASTNode const*) const
 		solAssert(
 			m_typeArgument && (
 					m_typeArgument->category() == Type::Category::Contract ||
-					m_typeArgument->category() == Type::Category::Integer
+					m_typeArgument->category() == Type::Category::Integer ||
+					m_typeArgument->category() == Type::Category::Enum
 			),
-			"Only contracts or integer types supported for now"
+			"Only enums, contracts or integer types supported for now"
 		);
 
 		if (m_typeArgument->category() == Type::Category::Contract)
@@ -3986,6 +4052,14 @@ MemberList::MemberMap MagicType::nativeMembers(ASTNode const*) const
 			return MemberList::MemberMap({
 				{"min", integerTypePointer},
 				{"max", integerTypePointer},
+			});
+		}
+		else if (m_typeArgument->category() == Type::Category::Enum)
+		{
+			EnumType const* enumTypePointer = dynamic_cast<EnumType const*>(m_typeArgument);
+			return MemberList::MemberMap({
+				{"min", enumTypePointer},
+				{"max", enumTypePointer},
 			});
 		}
 	}

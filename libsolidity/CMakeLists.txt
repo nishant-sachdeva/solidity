@@ -108,6 +108,10 @@ set(sources
 	formal/CHC.h
 	formal/EncodingContext.cpp
 	formal/EncodingContext.h
+	formal/ExpressionFormatter.cpp
+	formal/ExpressionFormatter.h
+	formal/Invariants.cpp
+	formal/Invariants.h
 	formal/ModelChecker.cpp
 	formal/ModelChecker.h
 	formal/ModelCheckerSettings.cpp
@@ -159,4 +163,4 @@ set(sources
 )
 
 add_library(solidity ${sources})
-target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost::boost)
+target_link_libraries(solidity PUBLIC yul evmasm langutil smtutil solutil Boost::boost fmt::fmt-header-only)

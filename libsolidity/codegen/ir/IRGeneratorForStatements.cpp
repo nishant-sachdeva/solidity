@@ -108,7 +108,7 @@ private:
 	{
 		auto const& reference = m_references.at(&_identifier);
 		auto const varDecl = dynamic_cast<VariableDeclaration const*>(reference.declaration);
-		solUnimplementedAssert(varDecl, "");
+		solUnimplementedAssert(varDecl);
 		string const& suffix = reference.suffix;
 
 		string value;
@@ -188,6 +188,18 @@ private:
 			solAssert(suffix == "offset" || suffix == "length", "");
 			value = IRVariable{*varDecl}.part(suffix).name();
 		}
+		else if (
+			auto const* functionType = dynamic_cast<FunctionType const*>(varDecl->type());
+			functionType && functionType->kind() == FunctionType::Kind::External
+		)
+		{
+			solAssert(suffix == "selector" || suffix == "address", "");
+			solAssert(varDecl->type()->sizeOnStack() == 2, "");
+			if (suffix == "selector")
+				value = IRVariable{*varDecl}.part("functionSelector").name();
+			else
+				value = IRVariable{*varDecl}.part("address").name();
+		}
 		else
 			solAssert(false, "");
 
@@ -205,10 +217,34 @@ private:
 
 }
 
+string IRGeneratorForStatementsBase::code() const
+{
+	return m_code.str();
+}
+
+std::ostringstream& IRGeneratorForStatementsBase::appendCode(bool _addLocationComment)
+{
+	if (
+		_addLocationComment &&
+		m_currentLocation.isValid() &&
+		m_lastLocation != m_currentLocation
+	)
+		m_code << dispenseLocationComment(m_currentLocation, m_context) << "\n";
+
+	m_lastLocation = m_currentLocation;
+
+	return m_code;
+}
+
+void IRGeneratorForStatementsBase::setLocation(ASTNode const& _node)
+{
+	m_currentLocation = _node.location();
+}
+
 string IRGeneratorForStatements::code() const
 {
 	solAssert(!m_currentLValue, "LValue not reset!");
-	return m_code.str();
+	return IRGeneratorForStatementsBase::code();
 }
 
 void IRGeneratorForStatements::generate(Block const& _block)
@@ -242,7 +278,7 @@ void IRGeneratorForStatements::initializeStateVar(VariableDeclaration const& _va
 			_varDecl.immutable() ?
 			IRLValue{*_varDecl.annotation().type, IRLValue::Immutable{&_varDecl}} :
 			IRLValue{*_varDecl.annotation().type, IRLValue::Storage{
-				util::toCompactHexWithPrefix(m_context.storageLocationOfStateVariable(_varDecl).first),
+				toCompactHexWithPrefix(m_context.storageLocationOfStateVariable(_varDecl).first),
 				m_context.storageLocationOfStateVariable(_varDecl).second
 			}},
 			*_varDecl.value()
@@ -289,6 +325,8 @@ IRVariable IRGeneratorForStatements::evaluateExpression(Expression const& _expre
 		setLocation(_expression);
 
 		_expression.accept(*this);
+
+		setLocation(_expression);
 		IRVariable variable{m_context.newYulVariable(), _targetType};
 		define(variable, _expression);
 		return variable;
@@ -305,16 +343,16 @@ string IRGeneratorForStatements::constantValueFunction(VariableDeclaration const
 {
 	try
 	{
-		setLocation(_constant);
-
 		string functionName = IRNames::constantValueFunction(_constant);
 		return m_context.functionCollector().createFunction(functionName, [&] {
 			Whiskers templ(R"(
+				<sourceLocationComment>
 				function <functionName>() -> <ret> {
 					<code>
 					<ret> := <value>
 				}
 			)");
+			templ("sourceLocationComment", dispenseLocationComment(_constant, m_context));
 			templ("functionName", functionName);
 			IRGeneratorForStatements generator(m_context, m_utils);
 			solAssert(_constant.value(), "");
@@ -376,19 +414,19 @@ bool IRGeneratorForStatements::visit(Conditional const& _conditional)
 	string condition = expressionAsType(_conditional.condition(), *TypeProvider::boolean());
 	declare(_conditional);
 
-	m_code << "switch " << condition << "\n" "case 0 {\n";
+	appendCode() << "switch " << condition << "\n" "case 0 {\n";
 
 	_conditional.falseExpression().accept(*this);
 	setLocation(_conditional);
 
 	assign(_conditional, _conditional.falseExpression());
-	m_code << "}\n" "default {\n";
+	appendCode() << "}\n" "default {\n";
 
 	_conditional.trueExpression().accept(*this);
 	setLocation(_conditional);
 
 	assign(_conditional, _conditional.trueExpression());
-	m_code << "}\n";
+	appendCode() << "}\n";
 
 	return false;
 }
@@ -472,7 +510,7 @@ bool IRGeneratorForStatements::visit(TupleExpression const& _tuple)
 			component.accept(*this);
 			setLocation(_tuple);
 			IRVariable converted = convert(component, baseType);
-			m_code <<
+			appendCode() <<
 				m_utils.writeToMemoryFunction(baseType) <<
 				"(" <<
 				("add(" + mpos + ", " + to_string(i * arrayType.memoryStride()) + ")") <<
@@ -553,24 +591,25 @@ bool IRGeneratorForStatements::visit(IfStatement const& _ifStatement)
 
 	if (_ifStatement.falseStatement())
 	{
-		m_code << "switch " << condition << "\n" "case 0 {\n";
+		appendCode() << "switch " << condition << "\n" "case 0 {\n";
 		_ifStatement.falseStatement()->accept(*this);
 		setLocation(_ifStatement);
-		m_code << "}\n" "default {\n";
+		appendCode() << "}\n" "default {\n";
 	}
 	else
-		m_code << "if " << condition << " {\n";
+		appendCode() << "if " << condition << " {\n";
 	_ifStatement.trueStatement().accept(*this);
 	setLocation(_ifStatement);
-	m_code << "}\n";
+	appendCode() << "}\n";
 
 	return false;
 }
 
-void IRGeneratorForStatements::endVisit(PlaceholderStatement const&)
+void IRGeneratorForStatements::endVisit(PlaceholderStatement const& _placeholder)
 {
 	solAssert(m_placeholderCallback, "");
-	m_code << m_placeholderCallback();
+	setLocation(_placeholder);
+	appendCode() << m_placeholderCallback();
 }
 
 bool IRGeneratorForStatements::visit(ForStatement const& _forStatement)
@@ -603,14 +642,14 @@ bool IRGeneratorForStatements::visit(WhileStatement const& _whileStatement)
 bool IRGeneratorForStatements::visit(Continue const& _continue)
 {
 	setLocation(_continue);
-	m_code << "continue\n";
+	appendCode() << "continue\n";
 	return false;
 }
 
 bool IRGeneratorForStatements::visit(Break const& _break)
 {
 	setLocation(_break);
-	m_code << "break\n";
+	appendCode() << "break\n";
 	return false;
 }
 
@@ -628,14 +667,23 @@ void IRGeneratorForStatements::endVisit(Return const& _return)
 		else if (returnParameters.size() == 1)
 			assign(m_context.localVariable(*returnParameters.front()), *value);
 	}
-	m_code << "leave\n";
+	appendCode() << "leave\n";
 }
 
-void IRGeneratorForStatements::endVisit(UnaryOperation const& _unaryOperation)
+bool IRGeneratorForStatements::visit(UnaryOperation const& _unaryOperation)
 {
 	setLocation(_unaryOperation);
 	Type const& resultType = type(_unaryOperation);
 	Token const op = _unaryOperation.getOperator();
+
+	if (resultType.category() == Type::Category::RationalNumber)
+	{
+		define(_unaryOperation) << formatNumber(resultType.literalValue(nullptr)) << "\n";
+		return false;
+	}
+
+	_unaryOperation.subExpression().accept(*this);
+	setLocation(_unaryOperation);
 
 	if (op == Token::Delete)
 	{
@@ -643,7 +691,7 @@ void IRGeneratorForStatements::endVisit(UnaryOperation const& _unaryOperation)
 		std::visit(
 			util::GenericVisitor{
 				[&](IRLValue::Storage const& _storage) {
-					m_code <<
+					appendCode() <<
 						m_utils.storageSetToZeroFunction(m_currentLValue->type) <<
 						"(" <<
 						_storage.slot <<
@@ -662,8 +710,6 @@ void IRGeneratorForStatements::endVisit(UnaryOperation const& _unaryOperation)
 			m_currentLValue->kind
 		);
 	}
-	else if (resultType.category() == Type::Category::RationalNumber)
-		define(_unaryOperation) << formatNumber(resultType.literalValue(nullptr)) << "\n";
 	else if (resultType.category() == Type::Category::Integer)
 	{
 		solAssert(resultType == type(_unaryOperation.subExpression()), "Result type doesn't match!");
@@ -703,7 +749,7 @@ void IRGeneratorForStatements::endVisit(UnaryOperation const& _unaryOperation)
 			) << "(" << IRVariable(_unaryOperation.subExpression()).name() << ")\n";
 		}
 		else
-			solUnimplementedAssert(false, "Unary operator not yet implemented");
+			solUnimplemented("Unary operator not yet implemented");
 	}
 	else if (resultType.category() == Type::Category::FixedBytes)
 	{
@@ -721,7 +767,9 @@ void IRGeneratorForStatements::endVisit(UnaryOperation const& _unaryOperation)
 		appendSimpleUnaryOperation(_unaryOperation, _unaryOperation.subExpression());
 	}
 	else
-		solUnimplementedAssert(false, "Unary operator not yet implemented");
+		solUnimplemented("Unary operator not yet implemented");
+
+	return false;
 }
 
 bool IRGeneratorForStatements::visit(BinaryOperation const& _binOp)
@@ -762,10 +810,8 @@ bool IRGeneratorForStatements::visit(BinaryOperation const& _binOp)
 		if (auto type = dynamic_cast<IntegerType const*>(commonType))
 			isSigned = type->isSigned();
 
-		string args =
-			expressionAsType(_binOp.leftExpression(), *commonType, true) +
-			", " +
-			expressionAsType(_binOp.rightExpression(), *commonType, true);
+		string args = expressionAsType(_binOp.leftExpression(), *commonType, true);
+		args += ", " + expressionAsType(_binOp.rightExpression(), *commonType, true);
 
 		string expr;
 		if (op == Token::Equal)
@@ -870,7 +916,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 		for (size_t i = 0; i < arguments.size(); i++)
 		{
 			IRVariable converted = convert(*arguments[i], *parameterTypes[i]);
-			m_code <<
+			appendCode() <<
 				m_utils.writeToMemoryFunction(*functionType->parameterTypes()[i]) <<
 				"(add(" <<
 				IRVariable(_functionCall).part("mpos").name() <<
@@ -1001,7 +1047,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 		templ("indexedArgs", joinHumanReadablePrefixed(indexedArgs | ranges::views::transform([&](auto const& _arg) {
 			return _arg.commaSeparatedList();
 		})));
-		m_code << templ.render();
+		appendCode() << templ.render();
 		break;
 	}
 	case FunctionType::Kind::Error:
@@ -1013,6 +1059,24 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 			error->functionType(true)->parameterTypes(),
 			_functionCall.sortedArguments()
 		);
+		break;
+	}
+	case FunctionType::Kind::Wrap:
+	case FunctionType::Kind::Unwrap:
+	{
+		solAssert(arguments.size() == 1, "");
+		FunctionType::Kind kind = functionType->kind();
+		if (kind == FunctionType::Kind::Wrap)
+			solAssert(
+				type(*arguments.at(0)).isImplicitlyConvertibleTo(
+					dynamic_cast<UserDefinedValueType const&>(type(_functionCall)).underlyingType()
+				),
+				""
+			);
+		else
+			solAssert(type(*arguments.at(0)).category() == Type::Category::UserDefinedValueType, "");
+
+		define(_functionCall, *arguments.at(0));
 		break;
 	}
 	case FunctionType::Kind::Assert:
@@ -1030,10 +1094,10 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 			messageArgumentType
 		);
 
-		m_code << move(requireOrAssertFunction) << "(" << IRVariable(*arguments[0]).name();
+		appendCode() << move(requireOrAssertFunction) << "(" << IRVariable(*arguments[0]).name();
 		if (messageArgumentType && messageArgumentType->sizeOnStack() > 0)
-			m_code << ", " << IRVariable(*arguments[1]).commaSeparatedList();
-		m_code << ")\n";
+			appendCode() << ", " << IRVariable(*arguments[1]).commaSeparatedList();
+		appendCode() << ")\n";
 
 		break;
 	}
@@ -1075,24 +1139,22 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 				// We might want to introduce a new set of memory handling functions here
 				// a la "setMemoryCheckPoint" and "freeUntilCheckPoint".
 				string freeMemoryPre = m_context.newYulVariable();
-				m_code << "let " << freeMemoryPre << " := " << m_utils.allocateUnboundedFunction() << "()\n";
+				appendCode() << "let " << freeMemoryPre << " := " << m_utils.allocateUnboundedFunction() << "()\n";
 				IRVariable array = convert(*arguments[0], *TypeProvider::bytesMemory());
 				IRVariable hashVariable(m_context.newYulVariable(), *TypeProvider::fixedBytes(32));
 
+				string dataAreaFunction = m_utils.arrayDataAreaFunction(*TypeProvider::bytesMemory());
+				string arrayLengthFunction = m_utils.arrayLengthFunction(*TypeProvider::bytesMemory());
 				define(hashVariable) <<
 					"keccak256(" <<
-					m_utils.arrayDataAreaFunction(*TypeProvider::bytesMemory()) <<
-					"(" <<
-					array.commaSeparatedList() <<
-					"), " <<
-					m_utils.arrayLengthFunction(*TypeProvider::bytesMemory()) <<
-					"(" <<
-					array.commaSeparatedList() <<
-					"))\n";
+					(dataAreaFunction + "(" + array.commaSeparatedList() + ")") <<
+					", " <<
+					(arrayLengthFunction + "(" + array.commaSeparatedList() +")") <<
+					")\n";
 				IRVariable selectorVariable(m_context.newYulVariable(), *TypeProvider::fixedBytes(4));
 				define(selectorVariable, hashVariable);
 				selector = selectorVariable.name();
-				m_code << m_utils.finalizeAllocationFunction() << "(" << freeMemoryPre << ", 0)\n";
+				appendCode() << m_utils.finalizeAllocationFunction() << "(" << freeMemoryPre << ", 0)\n";
 			}
 		}
 		else if (functionType->kind() == FunctionType::Kind::ABIEncodeWithSelector)
@@ -1122,7 +1184,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 		templ("arguments", joinHumanReadablePrefixed(argumentVars));
 		templ("finalizeAllocation", m_utils.finalizeAllocationFunction());
 
-		m_code << templ.render();
+		appendCode() << templ.render();
 		break;
 	}
 	case FunctionType::Kind::ABIDecode:
@@ -1161,7 +1223,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 		}
 		templ("retVars", IRVariable(_functionCall).commaSeparatedList());
 
-		m_code << templ.render();
+		appendCode() << templ.render();
 		break;
 	}
 	case FunctionType::Kind::Revert:
@@ -1173,7 +1235,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 			arguments.front()->annotation().type->isImplicitlyConvertibleTo(*TypeProvider::stringMemory()),
 		"");
 		if (m_context.revertStrings() == RevertStrings::Strip || arguments.empty())
-			m_code << "revert(0, 0)\n";
+			appendCode() << "revert(0, 0)\n";
 		else
 			revertWithError(
 				"Error(string)",
@@ -1213,16 +1275,14 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 		{
 			auto array = convert(*arguments[0], *arrayType);
 
+			string dataAreaFunction = m_utils.arrayDataAreaFunction(*arrayType);
+			string arrayLengthFunction = m_utils.arrayLengthFunction(*arrayType);
 			define(_functionCall) <<
 				"keccak256(" <<
-				m_utils.arrayDataAreaFunction(*arrayType) <<
-				"(" <<
-				array.commaSeparatedList() <<
-				"), " <<
-				m_utils.arrayLengthFunction(*arrayType) <<
-				"(" <<
-				array.commaSeparatedList() <<
-				"))\n";
+				(dataAreaFunction + "(" + array.commaSeparatedList() + ")") <<
+				", " <<
+				(arrayLengthFunction + "(" + array.commaSeparatedList() +")") <<
+				")\n";
 		}
 		break;
 	}
@@ -1248,7 +1308,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 		{
 			auto slotName = m_context.newYulVariable();
 			auto offsetName = m_context.newYulVariable();
-			m_code << "let " << slotName << ", " << offsetName << " := " <<
+			appendCode() << "let " << slotName << ", " << offsetName << " := " <<
 				m_utils.storageArrayPushZeroFunction(*arrayType) <<
 				"(" << IRVariable(_functionCall.expression()).commaSeparatedList() << ")\n";
 			setLValue(_functionCall, IRLValue{
@@ -1266,7 +1326,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 				convert(*arguments.front(), *arrayType->baseType()) :
 				*arguments.front();
 
-			m_code <<
+			appendCode() <<
 				m_utils.storageArrayPushFunction(*arrayType, &argument.type()) <<
 				"(" <<
 				IRVariable(_functionCall.expression()).commaSeparatedList() <<
@@ -1311,7 +1371,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 		Whiskers templ("if iszero(<modulus>) { <panic>() }\n");
 		templ("modulus", modulus.name());
 		templ("panic", m_utils.panicFunction(PanicCode::DivisionByZero));
-		m_code << templ.render();
+		appendCode() << templ.render();
 
 		string args;
 		for (size_t i = 0; i < 2; ++i)
@@ -1357,8 +1417,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 			&dynamic_cast<ContractType const&>(*functionType->returnParameterTypes().front()).contractDefinition();
 		m_context.subObjectsCreated().insert(contract);
 
-		Whiskers t(R"(
-			let <memPos> := <allocateUnbounded>()
+		Whiskers t(R"(let <memPos> := <allocateUnbounded>()
 			let <memEnd> := add(<memPos>, datasize("<object>"))
 			if or(gt(<memEnd>, 0xffffffffffffffff), lt(<memEnd>, <memPos>)) { <panic>() }
 			datacopy(<memPos>, dataoffset("<object>"), datasize("<object>"))
@@ -1394,7 +1453,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 			t("success", IRNames::trySuccessConditionVariable(_functionCall));
 		else
 			t("forwardingRevert", m_utils.forwardingRevertFunction());
-		m_code << t.render();
+		appendCode() << t.render();
 
 		break;
 	}
@@ -1422,7 +1481,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 			templ("success", IRVariable(_functionCall).commaSeparatedList());
 		templ("isTransfer", functionType->kind() == FunctionType::Kind::Transfer);
 		templ("forwardingRevert", m_utils.forwardingRevertFunction());
-		m_code << templ.render();
+		appendCode() << templ.render();
 
 		break;
 	}
@@ -1485,7 +1544,7 @@ void IRGeneratorForStatements::endVisit(FunctionCall const& _functionCall)
 			templ("gas", "sub(gas(), " + formatNumber(gasNeededByCaller) + ")");
 		}
 
-		m_code << templ.render();
+		appendCode() << templ.render();
 
 		break;
 	}
@@ -1499,7 +1558,7 @@ void IRGeneratorForStatements::endVisit(FunctionCallOptions const& _options)
 	setLocation(_options);
 	FunctionType const& previousType = dynamic_cast<FunctionType const&>(*_options.expression().annotation().type);
 
-	solUnimplementedAssert(!previousType.bound(), "");
+	solUnimplementedAssert(!previousType.bound());
 
 	// Copy over existing values.
 	for (auto const& item: previousType.stackItems())
@@ -1549,12 +1608,10 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 		define(IRVariable(_memberAccess).part("self"), _memberAccess.expression());
 		solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Static, "");
 		if (memberFunctionType->kind() == FunctionType::Kind::Internal)
-		{
-			auto const& functionDefinition = dynamic_cast<FunctionDefinition const&>(memberFunctionType->declaration());
-			define(IRVariable(_memberAccess).part("functionIdentifier")) << to_string(functionDefinition.id()) << "\n";
-			if (!_memberAccess.annotation().calledDirectly)
-				m_context.addToInternalDispatch(functionDefinition);
-		}
+			assignInternalFunctionIDIfNotCalledDirectly(
+				_memberAccess,
+				dynamic_cast<FunctionDefinition const&>(memberFunctionType->declaration())
+			);
 		else if (
 			memberFunctionType->kind() == FunctionType::Kind::ArrayPush ||
 			memberFunctionType->kind() == FunctionType::Kind::ArrayPop
@@ -1613,11 +1670,14 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 				expressionAsType(_memberAccess.expression(), *TypeProvider::address()) <<
 				")\n";
 		else if (member == "code")
+		{
+			string externalCodeFunction = m_utils.externalCodeFunction();
 			define(_memberAccess) <<
-				m_utils.externalCodeFunction() <<
+				externalCodeFunction <<
 				"(" <<
 				expressionAsType(_memberAccess.expression(), *TypeProvider::address()) <<
 				")\n";
+		}
 		else if (member == "codehash")
 			define(_memberAccess) <<
 				"extcodehash(" <<
@@ -1668,7 +1728,7 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 		{
 			solUnimplementedAssert(
 				dynamic_cast<FunctionType const&>(*_memberAccess.expression().annotation().type).kind() ==
-				FunctionType::Kind::External, ""
+				FunctionType::Kind::External
 			);
 			define(IRVariable{_memberAccess}, IRVariable(_memberAccess.expression()).part("address"));
 		}
@@ -1700,6 +1760,8 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 			define(_memberAccess) << "gasprice()\n";
 		else if (member == "chainid")
 			define(_memberAccess) << "chainid()\n";
+		else if (member == "basefee")
+			define(_memberAccess) << "basefee()\n";
 		else if (member == "data")
 		{
 			IRVariable var(_memberAccess);
@@ -1722,7 +1784,7 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 			solAssert(!contractType.isSuper(), "");
 			ContractDefinition const& contract = contractType.contractDefinition();
 			m_context.subObjectsCreated().insert(&contract);
-			m_code << Whiskers(R"(
+			appendCode() << Whiskers(R"(
 				let <size> := datasize("<objectName>")
 				let <result> := <allocationFunction>(add(<size>, 32))
 				mstore(<result>, <size>)
@@ -1750,12 +1812,26 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 		else if (member == "min" || member == "max")
 		{
 			MagicType const* arg = dynamic_cast<MagicType const*>(_memberAccess.expression().annotation().type);
-			IntegerType const* integerType = dynamic_cast<IntegerType const*>(arg->typeArgument());
 
-			if (member == "min")
-				define(_memberAccess) << formatNumber(integerType->min()) << "\n";
+			string requestedValue;
+			if (IntegerType const* integerType = dynamic_cast<IntegerType const*>(arg->typeArgument()))
+			{
+				if (member == "min")
+					requestedValue = formatNumber(integerType->min());
+				else
+					requestedValue = formatNumber(integerType->max());
+			}
+			else if (EnumType const* enumType = dynamic_cast<EnumType const*>(arg->typeArgument()))
+			{
+				if (member == "min")
+					requestedValue = to_string(enumType->minValue());
+				else
+					requestedValue = to_string(enumType->maxValue());
+			}
 			else
-				define(_memberAccess) << formatNumber(integerType->max()) << "\n";
+				solAssert(false, "min/max requested on unexpected type.");
+
+			define(_memberAccess) << requestedValue << "\n";
 		}
 		else if (set<string>{"encode", "encodePacked", "encodeWithSelector", "encodeWithSignature", "decode"}.count(member))
 		{
@@ -1775,7 +1851,7 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 		{
 			pair<u256, unsigned> const& offsets = structType.storageOffsetsOfMember(member);
 			string slot = m_context.newYulVariable();
-			m_code << "let " << slot << " := " <<
+			appendCode() << "let " << slot << " := " <<
 				("add(" + expression.part("slot").name() + ", " + offsets.first.str() + ")\n");
 			setLValue(_memberAccess, IRLValue{
 				type(_memberAccess),
@@ -1786,7 +1862,7 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 		case DataLocation::Memory:
 		{
 			string pos = m_context.newYulVariable();
-			m_code << "let " << pos << " := " <<
+			appendCode() << "let " << pos << " := " <<
 				("add(" + expression.part("mpos").name() + ", " + structType.memoryOffsetOfMember(member).str() + ")\n");
 			setLValue(_memberAccess, IRLValue{
 				type(_memberAccess),
@@ -1798,7 +1874,7 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 		{
 			string baseRef = expression.part("offset").name();
 			string offset = m_context.newYulVariable();
-			m_code << "let " << offset << " := " << "add(" << baseRef << ", " << to_string(structType.calldataOffsetOfMember(member)) << ")\n";
+			appendCode() << "let " << offset << " := " << "add(" << baseRef << ", " << to_string(structType.calldataOffsetOfMember(member)) << ")\n";
 			if (_memberAccess.annotation().type->isDynamicallyEncoded())
 				define(_memberAccess) <<
 					m_utils.accessCalldataTailFunction(*_memberAccess.annotation().type) <<
@@ -1892,14 +1968,12 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 						*_memberAccess.annotation().referencedDeclaration
 					).resolveVirtual(m_context.mostDerivedContract(), super);
 
-				define(_memberAccess) << to_string(resolvedFunctionDef.id()) << "\n";
 				solAssert(resolvedFunctionDef.functionType(true), "");
 				solAssert(resolvedFunctionDef.functionType(true)->kind() == FunctionType::Kind::Internal, "");
-				if (!_memberAccess.annotation().calledDirectly)
-					m_context.addToInternalDispatch(resolvedFunctionDef);
+				assignInternalFunctionIDIfNotCalledDirectly(_memberAccess, resolvedFunctionDef);
 			}
 			else if (auto const* variable = dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration))
-					handleVariableReference(*variable, _memberAccess);
+				handleVariableReference(*variable, _memberAccess);
 			else if (memberFunctionType)
 			{
 				switch (memberFunctionType->kind())
@@ -1908,11 +1982,7 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 					break;
 				case FunctionType::Kind::Internal:
 					if (auto const* function = dynamic_cast<FunctionDefinition const*>(_memberAccess.annotation().referencedDeclaration))
-					{
-						define(_memberAccess) << to_string(function->id()) << "\n";
-						if (!_memberAccess.annotation().calledDirectly)
-							m_context.addToInternalDispatch(*function);
-					}
+						assignInternalFunctionIDIfNotCalledDirectly(_memberAccess, *function);
 					else
 						solAssert(false, "Function not found in member access");
 					break;
@@ -1961,6 +2031,8 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 		}
 		else if (EnumType const* enumType = dynamic_cast<EnumType const*>(&actualType))
 			define(_memberAccess) << to_string(enumType->memberValue(_memberAccess.memberName())) << "\n";
+		else if (dynamic_cast<UserDefinedValueType const*>(&actualType))
+			solAssert(member == "wrap" || member == "unwrap", "");
 		else if (auto const* arrayType = dynamic_cast<ArrayType const*>(&actualType))
 			solAssert(arrayType->isByteArray() && member == "concat", "");
 		else
@@ -1995,10 +2067,7 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
 			solAssert(funType->kind() == FunctionType::Kind::Internal, "");
 			solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Static, "");
 
-			define(_memberAccess) << to_string(function->id()) << "\n";
-
-			if (!_memberAccess.annotation().calledDirectly)
-				m_context.addToInternalDispatch(*function);
+			assignInternalFunctionIDIfNotCalledDirectly(_memberAccess, *function);
 		}
 		else if (auto const* contract = dynamic_cast<ContractDefinition const*>(_memberAccess.annotation().referencedDeclaration))
 		{
@@ -2023,7 +2092,7 @@ bool IRGeneratorForStatements::visit(InlineAssembly const& _inlineAsm)
 	solAssert(holds_alternative<yul::Block>(modified), "");
 
 	// Do not provide dialect so that we get the full type information.
-	m_code << yul::AsmPrinter()(std::get<yul::Block>(modified)) << "\n";
+	appendCode() << yul::AsmPrinter()(std::get<yul::Block>(modified)) << "\n";
 	return false;
 }
 
@@ -2046,7 +2115,7 @@ void IRGeneratorForStatements::endVisit(IndexAccess const& _indexAccess)
 		templ("indexAccess", m_utils.mappingIndexAccessFunction(mappingType, keyType));
 		templ("base", IRVariable(_indexAccess.baseExpression()).commaSeparatedList());
 		templ("key", IRVariable(*_indexAccess.indexExpression()).commaSeparatedList());
-		m_code << templ.render();
+		appendCode() << templ.render();
 		setLValue(_indexAccess, IRLValue{
 			*_indexAccess.annotation().type,
 			IRLValue::Storage{
@@ -2074,7 +2143,7 @@ void IRGeneratorForStatements::endVisit(IndexAccess const& _indexAccess)
 				string slot = m_context.newYulVariable();
 				string offset = m_context.newYulVariable();
 
-				m_code << Whiskers(R"(
+				appendCode() << Whiskers(R"(
 					let <slot>, <offset> := <indexFunc>(<array>, <index>)
 				)")
 				("slot", slot)
@@ -2109,8 +2178,9 @@ void IRGeneratorForStatements::endVisit(IndexAccess const& _indexAccess)
 			}
 			case DataLocation::CallData:
 			{
+				string indexAccessFunction = m_utils.calldataArrayIndexAccessFunction(arrayType);
 				string const indexAccessFunctionCall =
-					m_utils.calldataArrayIndexAccessFunction(arrayType) +
+					indexAccessFunction +
 					"(" +
 					IRVariable(_indexAccess.baseExpression()).commaSeparatedList() +
 					", " +
@@ -2141,7 +2211,7 @@ void IRGeneratorForStatements::endVisit(IndexAccess const& _indexAccess)
 
 		IRVariable index{m_context.newYulVariable(), *TypeProvider::uint256()};
 		define(index, *_indexAccess.indexExpression());
-		m_code << Whiskers(R"(
+		appendCode() << Whiskers(R"(
 			if iszero(lt(<index>, <length>)) { <panic>() }
 			let <result> := <shl248>(byte(<index>, <array>))
 		)")
@@ -2206,7 +2276,7 @@ void IRGeneratorForStatements::endVisit(IndexRangeAccess const& _indexRangeAcces
 			break;
 		}
 		default:
-			solUnimplementedAssert(false, "Index range accesses is implemented only on calldata arrays.");
+			solUnimplemented("Index range accesses is implemented only on calldata arrays.");
 	}
 }
 
@@ -2242,12 +2312,10 @@ void IRGeneratorForStatements::endVisit(Identifier const& _identifier)
 	{
 		solAssert(*_identifier.annotation().requiredLookup == VirtualLookup::Virtual, "");
 		FunctionDefinition const& resolvedFunctionDef = functionDef->resolveVirtual(m_context.mostDerivedContract());
-		define(_identifier) << to_string(resolvedFunctionDef.id()) << "\n";
 
 		solAssert(resolvedFunctionDef.functionType(true), "");
 		solAssert(resolvedFunctionDef.functionType(true)->kind() == FunctionType::Kind::Internal, "");
-		if (!_identifier.annotation().calledDirectly)
-			m_context.addToInternalDispatch(resolvedFunctionDef);
+		assignInternalFunctionIDIfNotCalledDirectly(_identifier, resolvedFunctionDef);
 	}
 	else if (VariableDeclaration const* varDecl = dynamic_cast<VariableDeclaration const*>(declaration))
 		handleVariableReference(*varDecl, _identifier);
@@ -2273,6 +2341,10 @@ void IRGeneratorForStatements::endVisit(Identifier const& _identifier)
 		// no-op
 	}
 	else if (dynamic_cast<ImportDirective const*>(declaration))
+	{
+		// no-op
+	}
+	else if (dynamic_cast<UserDefinedValueTypeDefinition const*>(declaration))
 	{
 		// no-op
 	}
@@ -2307,7 +2379,6 @@ void IRGeneratorForStatements::handleVariableReference(
 	Expression const& _referencingExpression
 )
 {
-	setLocation(_referencingExpression);
 	if ((_variable.isStateVariable() || _variable.isFileLevelVariable()) && _variable.isConstant())
 		define(_referencingExpression) << constantValueFunction(_variable) << "()\n";
 	else if (_variable.isStateVariable() && _variable.immutable())
@@ -2377,12 +2448,13 @@ void IRGeneratorForStatements::appendExternalFunctionCall(
 		// We could also just use MLOAD; POP right before the gas calculation, but the optimizer
 		// would remove that, so we use MSTORE here.
 		if (!funType.gasSet() && returnInfo.estimatedReturnSize > 0)
-			m_code << "mstore(add(" << m_utils.allocateUnboundedFunction() << "() , " << to_string(returnInfo.estimatedReturnSize) << "), 0)\n";
+			appendCode() << "mstore(add(" << m_utils.allocateUnboundedFunction() << "() , " << to_string(returnInfo.estimatedReturnSize) << "), 0)\n";
 	}
 
 	Whiskers templ(R"(
-		if iszero(extcodesize(<address>)) { <revertNoCode>() }
-
+		<?checkExtcodesize>
+			if iszero(extcodesize(<address>)) { <revertNoCode>() }
+		</checkExtcodesize>
 		// storage for arguments and returned data
 		let <pos> := <allocateUnbounded>()
 		mstore(<pos>, <shl28>(<funSel>))
@@ -2407,6 +2479,18 @@ void IRGeneratorForStatements::appendExternalFunctionCall(
 		}
 	)");
 	templ("revertNoCode", m_utils.revertReasonIfDebugFunction("Target contract does not contain code"));
+
+	// We do not need to check extcodesize if we expect return data: If there is no
+	// code, the call will return empty data and the ABI decoder will revert.
+	size_t encodedHeadSize = 0;
+	for (auto const& t: returnInfo.returnTypes)
+		encodedHeadSize += t->decodingType()->calldataHeadSize();
+	bool const checkExtcodesize =
+		encodedHeadSize == 0 ||
+		!m_context.evmVersion().supportsReturndata() ||
+		m_context.revertStrings() >= RevertStrings::Debug;
+	templ("checkExtcodesize", checkExtcodesize);
+
 	templ("pos", m_context.newYulVariable());
 	templ("end", m_context.newYulVariable());
 	if (_functionCall.annotation().tryCall)
@@ -2462,6 +2546,8 @@ void IRGeneratorForStatements::appendExternalFunctionCall(
 		u256 gasNeededByCaller = evmasm::GasCosts::callGas(m_context.evmVersion()) + 10;
 		if (funType.valueSet())
 			gasNeededByCaller += evmasm::GasCosts::callValueTransferGas;
+		if (!checkExtcodesize)
+			gasNeededByCaller += evmasm::GasCosts::callNewAccountGas; // we never know
 		templ("gas", "sub(gas(), " + formatNumber(gasNeededByCaller) + ")");
 	}
 	// Order is important here, STATICCALL might overlap with DELEGATECALL.
@@ -2474,7 +2560,7 @@ void IRGeneratorForStatements::appendExternalFunctionCall(
 
 	templ("forwardingRevert", m_utils.forwardingRevertFunction());
 
-	m_code << templ.render();
+	appendCode() << templ.render();
 }
 
 void IRGeneratorForStatements::appendBareCall(
@@ -2565,7 +2651,26 @@ void IRGeneratorForStatements::appendBareCall(
 		templ("gas", "sub(gas(), " + formatNumber(gasNeededByCaller) + ")");
 	}
 
-	m_code << templ.render();
+	appendCode() << templ.render();
+}
+
+void IRGeneratorForStatements::assignInternalFunctionIDIfNotCalledDirectly(
+	Expression const& _expression,
+	FunctionDefinition const& _referencedFunction
+)
+{
+	solAssert(
+		dynamic_cast<MemberAccess const*>(&_expression) ||
+		dynamic_cast<Identifier const*>(&_expression),
+		""
+	);
+	if (_expression.annotation().calledDirectly)
+		return;
+
+	define(IRVariable(_expression).part("functionIdentifier")) <<
+		to_string(m_context.internalFunctionID(_referencedFunction, false)) <<
+		"\n";
+	m_context.addToInternalDispatch(_referencedFunction);
 }
 
 IRVariable IRGeneratorForStatements::convert(IRVariable const& _from, Type const& _to)
@@ -2597,14 +2702,14 @@ std::string IRGeneratorForStatements::expressionAsType(Expression const& _expres
 std::ostream& IRGeneratorForStatements::define(IRVariable const& _var)
 {
 	if (_var.type().sizeOnStack() > 0)
-		m_code << "let " << _var.commaSeparatedList() << " := ";
-	return m_code;
+		appendCode() << "let " << _var.commaSeparatedList() << " := ";
+	return appendCode(false);
 }
 
 void IRGeneratorForStatements::declare(IRVariable const& _var)
 {
 	if (_var.type().sizeOnStack() > 0)
-		m_code << "let " << _var.commaSeparatedList() << "\n";
+		appendCode() << "let " << _var.commaSeparatedList() << "\n";
 }
 
 void IRGeneratorForStatements::declareAssign(IRVariable const& _lhs, IRVariable const& _rhs, bool _declare)
@@ -2615,15 +2720,15 @@ void IRGeneratorForStatements::declareAssign(IRVariable const& _lhs, IRVariable 
 			if (stackItemType)
 				declareAssign(_lhs.part(stackItemName), _rhs.part(stackItemName), _declare);
 			else
-				m_code << (_declare ? "let ": "") << _lhs.part(stackItemName).name() << " := " << _rhs.part(stackItemName).name() << "\n";
+				appendCode() << (_declare ? "let ": "") << _lhs.part(stackItemName).name() << " := " << _rhs.part(stackItemName).name() << "\n";
 	else
 	{
 		if (_lhs.type().sizeOnStack() > 0)
-			m_code <<
+			appendCode() <<
 				(_declare ? "let ": "") <<
 				_lhs.commaSeparatedList() <<
 				" := ";
-		m_code << m_context.utils().conversionFunction(_rhs.type(), _lhs.type()) <<
+		appendCode() << m_context.utils().conversionFunction(_rhs.type(), _lhs.type()) <<
 			"(" <<
 			_rhs.commaSeparatedList() <<
 			")\n";
@@ -2761,13 +2866,13 @@ void IRGeneratorForStatements::appendAndOrOperatorCode(BinaryOperation const& _b
 	IRVariable value(_binOp);
 	define(value, _binOp.leftExpression());
 	if (op == Token::Or)
-		m_code << "if iszero(" << value.name() << ") {\n";
+		appendCode() << "if iszero(" << value.name() << ") {\n";
 	else
-		m_code << "if " << value.name() << " {\n";
+		appendCode() << "if " << value.name() << " {\n";
 	_binOp.rightExpression().accept(*this);
 	setLocation(_binOp);
 	assign(value, _binOp.rightExpression());
-	m_code << "}\n";
+	appendCode() << "}\n";
 }
 
 void IRGeneratorForStatements::writeToLValue(IRLValue const& _lvalue, IRVariable const& _value)
@@ -2783,7 +2888,7 @@ void IRGeneratorForStatements::writeToLValue(IRLValue const& _lvalue, IRVariable
 					[&](string const& _offset) { offsetArgument = ", " + _offset; }
 				}, _storage.offset);
 
-				m_code <<
+				appendCode() <<
 					m_utils.updateStorageValueFunction(_value.type(), _lvalue.type, offsetStatic) <<
 					"(" <<
 					_storage.slot <<
@@ -2801,10 +2906,10 @@ void IRGeneratorForStatements::writeToLValue(IRLValue const& _lvalue, IRVariable
 					if (_memory.byteArrayElement)
 					{
 						solAssert(_lvalue.type == *TypeProvider::byte(), "");
-						m_code << "mstore8(" + _memory.address + ", byte(0, " + prepared.commaSeparatedList() + "))\n";
+						appendCode() << "mstore8(" + _memory.address + ", byte(0, " + prepared.commaSeparatedList() + "))\n";
 					}
 					else
-						m_code << m_utils.writeToMemoryFunction(_lvalue.type) <<
+						appendCode() << m_utils.writeToMemoryFunction(_lvalue.type) <<
 							"(" <<
 							_memory.address <<
 							", " <<
@@ -2812,33 +2917,36 @@ void IRGeneratorForStatements::writeToLValue(IRLValue const& _lvalue, IRVariable
 							")\n";
 				}
 				else if (auto const* literalType = dynamic_cast<StringLiteralType const*>(&_value.type()))
-					m_code <<
-						m_utils.writeToMemoryFunction(*TypeProvider::uint256()) <<
+				{
+					string writeUInt = m_utils.writeToMemoryFunction(*TypeProvider::uint256());
+					appendCode() <<
+						writeUInt <<
 						"(" <<
 						_memory.address <<
 						", " <<
 						m_utils.copyLiteralToMemoryFunction(literalType->value()) + "()" <<
 						")\n";
+				}
 				else
 				{
 					solAssert(_lvalue.type.sizeOnStack() == 1, "");
 					auto const* valueReferenceType = dynamic_cast<ReferenceType const*>(&_value.type());
 					solAssert(valueReferenceType && valueReferenceType->dataStoredIn(DataLocation::Memory), "");
-					m_code << "mstore(" + _memory.address + ", " + _value.part("mpos").name() + ")\n";
+					appendCode() << "mstore(" + _memory.address + ", " + _value.part("mpos").name() + ")\n";
 				}
 			},
 			[&](IRLValue::Stack const& _stack) { assign(_stack.variable, _value); },
 			[&](IRLValue::Immutable const& _immutable)
 			{
-				solUnimplementedAssert(_lvalue.type.isValueType(), "");
-				solUnimplementedAssert(_lvalue.type.sizeOnStack() == 1, "");
+				solUnimplementedAssert(_lvalue.type.isValueType());
+				solUnimplementedAssert(_lvalue.type.sizeOnStack() == 1);
 				solAssert(_lvalue.type == *_immutable.variable->type(), "");
 				size_t memOffset = m_context.immutableMemoryOffset(*_immutable.variable);
 
 				IRVariable prepared(m_context.newYulVariable(), _lvalue.type);
 				define(prepared, _value);
 
-				m_code << "mstore(" << to_string(memOffset) << ", " << prepared.commaSeparatedList() << ")\n";
+				appendCode() << "mstore(" << to_string(memOffset) << ", " << prepared.commaSeparatedList() << ")\n";
 			},
 			[&](IRLValue::Tuple const& _tuple) {
 				auto components = std::move(_tuple.components);
@@ -2890,10 +2998,20 @@ IRVariable IRGeneratorForStatements::readFromLValue(IRLValue const& _lvalue)
 			define(result, _stack.variable);
 		},
 		[&](IRLValue::Immutable const& _immutable) {
-			solUnimplementedAssert(_lvalue.type.isValueType(), "");
-			solUnimplementedAssert(_lvalue.type.sizeOnStack() == 1, "");
+			solUnimplementedAssert(_lvalue.type.isValueType());
+			solUnimplementedAssert(_lvalue.type.sizeOnStack() == 1);
 			solAssert(_lvalue.type == *_immutable.variable->type(), "");
-			define(result) << "loadimmutable(\"" << to_string(_immutable.variable->id()) << "\")\n";
+			if (m_context.executionContext() == IRGenerationContext::ExecutionContext::Creation)
+			{
+				string readFunction = m_utils.readFromMemory(*_immutable.variable->type());
+				define(result) <<
+					readFunction <<
+					"(" <<
+					to_string(m_context.immutableMemoryOffset(*_immutable.variable)) <<
+					")\n";
+			}
+			else
+				define(result) << "loadimmutable(\"" << to_string(_immutable.variable->id()) << "\")\n";
 		},
 		[&](IRLValue::Tuple const&) {
 			solAssert(false, "Attempted to read from tuple lvalue.");
@@ -2931,36 +3049,36 @@ void IRGeneratorForStatements::generateLoop(
 	{
 		solAssert(_conditionExpression, "Expected condition for doWhile");
 		firstRun = m_context.newYulVariable();
-		m_code << "let " << firstRun << " := 1\n";
+		appendCode() << "let " << firstRun << " := 1\n";
 	}
 
-	m_code << "for {\n";
+	appendCode() << "for {\n";
 	if (_initExpression)
 		_initExpression->accept(*this);
-	m_code << "} 1 {\n";
+	appendCode() << "} 1 {\n";
 	if (_loopExpression)
 		_loopExpression->accept(*this);
-	m_code << "}\n";
-	m_code << "{\n";
+	appendCode() << "}\n";
+	appendCode() << "{\n";
 
 	if (_conditionExpression)
 	{
 		if (_isDoWhile)
-			m_code << "if iszero(" << firstRun << ") {\n";
+			appendCode() << "if iszero(" << firstRun << ") {\n";
 
 		_conditionExpression->accept(*this);
-		m_code <<
+		appendCode() <<
 			"if iszero(" <<
 			expressionAsType(*_conditionExpression, *TypeProvider::boolean()) <<
 			") { break }\n";
 
 		if (_isDoWhile)
-			m_code << "}\n" << firstRun << " := 0\n";
+			appendCode() << "}\n" << firstRun << " := 0\n";
 	}
 
 	_body.accept(*this);
 
-	m_code << "}\n";
+	appendCode() << "}\n";
 }
 
 Type const& IRGeneratorForStatements::type(Expression const& _expression)
@@ -2975,9 +3093,9 @@ bool IRGeneratorForStatements::visit(TryStatement const& _tryStatement)
 	externalCall.accept(*this);
 	setLocation(_tryStatement);
 
-	m_code << "switch iszero(" << IRNames::trySuccessConditionVariable(externalCall) << ")\n";
+	appendCode() << "switch iszero(" << IRNames::trySuccessConditionVariable(externalCall) << ")\n";
 
-	m_code << "case 0 { // success case\n";
+	appendCode() << "case 0 { // success case\n";
 	TryCatchClause const& successClause = *_tryStatement.clauses().front();
 	if (successClause.parameters())
 	{
@@ -2995,32 +3113,34 @@ bool IRGeneratorForStatements::visit(TryStatement const& _tryStatement)
 
 	successClause.block().accept(*this);
 	setLocation(_tryStatement);
-	m_code << "}\n";
+	appendCode() << "}\n";
 
-	m_code << "default { // failure case\n";
+	appendCode() << "default { // failure case\n";
 	handleCatch(_tryStatement);
-	m_code << "}\n";
+	appendCode() << "}\n";
 
 	return false;
 }
 
 void IRGeneratorForStatements::handleCatch(TryStatement const& _tryStatement)
 {
+	setLocation(_tryStatement);
 	string const runFallback = m_context.newYulVariable();
-	m_code << "let " << runFallback << " := 1\n";
+	appendCode() << "let " << runFallback << " := 1\n";
 
 	// This function returns zero on "short returndata". We have to add a success flag
 	// once we implement custom error codes.
 	if (_tryStatement.errorClause() || _tryStatement.panicClause())
-		m_code << "switch " << m_utils.returnDataSelectorFunction() << "()\n";
+		appendCode() << "switch " << m_utils.returnDataSelectorFunction() << "()\n";
 
 	if (TryCatchClause const* errorClause = _tryStatement.errorClause())
 	{
-		m_code << "case " << selectorFromSignature32("Error(string)") << " {\n";
+		appendCode() << "case " << selectorFromSignature32("Error(string)") << " {\n";
+		setLocation(*errorClause);
 		string const dataVariable = m_context.newYulVariable();
-		m_code << "let " << dataVariable << " := " << m_utils.tryDecodeErrorMessageFunction() << "()\n";
-		m_code << "if " << dataVariable << " {\n";
-		m_code << runFallback << " := 0\n";
+		appendCode() << "let " << dataVariable << " := " << m_utils.tryDecodeErrorMessageFunction() << "()\n";
+		appendCode() << "if " << dataVariable << " {\n";
+		appendCode() << runFallback << " := 0\n";
 		if (errorClause->parameters())
 		{
 			solAssert(errorClause->parameters()->parameters().size() == 1, "");
@@ -3028,17 +3148,20 @@ void IRGeneratorForStatements::handleCatch(TryStatement const& _tryStatement)
 			define(var) << dataVariable << "\n";
 		}
 		errorClause->accept(*this);
-		m_code << "}\n";
-		m_code << "}\n";
+		setLocation(*errorClause);
+		appendCode() << "}\n";
+		setLocation(_tryStatement);
+		appendCode() << "}\n";
 	}
 	if (TryCatchClause const* panicClause = _tryStatement.panicClause())
 	{
-		m_code << "case " << selectorFromSignature32("Panic(uint256)") << " {\n";
+		appendCode() << "case " << selectorFromSignature32("Panic(uint256)") << " {\n";
+		setLocation(*panicClause);
 		string const success = m_context.newYulVariable();
 		string const code = m_context.newYulVariable();
-		m_code << "let " << success << ", " << code << " := " << m_utils.tryDecodePanicDataFunction() << "()\n";
-		m_code << "if " << success << " {\n";
-		m_code << runFallback << " := 0\n";
+		appendCode() << "let " << success << ", " << code << " := " << m_utils.tryDecodePanicDataFunction() << "()\n";
+		appendCode() << "if " << success << " {\n";
+		appendCode() << runFallback << " := 0\n";
 		if (panicClause->parameters())
 		{
 			solAssert(panicClause->parameters()->parameters().size() == 1, "");
@@ -3046,20 +3169,25 @@ void IRGeneratorForStatements::handleCatch(TryStatement const& _tryStatement)
 			define(var) << code << "\n";
 		}
 		panicClause->accept(*this);
-		m_code << "}\n";
-		m_code << "}\n";
+		setLocation(*panicClause);
+		appendCode() << "}\n";
+		setLocation(_tryStatement);
+		appendCode() << "}\n";
 	}
 
-	m_code << "if " << runFallback << " {\n";
+	setLocation(_tryStatement);
+	appendCode() << "if " << runFallback << " {\n";
 	if (_tryStatement.fallbackClause())
 		handleCatchFallback(*_tryStatement.fallbackClause());
 	else
-		m_code << m_utils.forwardingRevertFunction() << "()\n";
-	m_code << "}\n";
+		appendCode() << m_utils.forwardingRevertFunction() << "()\n";
+	setLocation(_tryStatement);
+	appendCode() << "}\n";
 }
 
 void IRGeneratorForStatements::handleCatchFallback(TryCatchClause const& _fallback)
 {
+	setLocation(_fallback);
 	if (_fallback.parameters())
 	{
 		solAssert(m_context.evmVersion().supportsReturndata(), "");
@@ -3104,7 +3232,7 @@ void IRGeneratorForStatements::revertWithError(
 	templ("argumentVars", joinHumanReadablePrefixed(errorArgumentVars));
 	templ("encode", m_context.abiFunctions().tupleEncoder(errorArgumentTypes, _parameterTypes));
 
-	m_code << templ.render();
+	appendCode() << templ.render();
 }
 
 
@@ -3112,11 +3240,6 @@ bool IRGeneratorForStatements::visit(TryCatchClause const& _clause)
 {
 	_clause.block().accept(*this);
 	return false;
-}
-
-void IRGeneratorForStatements::setLocation(ASTNode const& _node)
-{
-	m_currentLocation = _node.location();
 }
 
 string IRGeneratorForStatements::linkerSymbol(ContractDefinition const& _library) const

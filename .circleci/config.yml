@@ -9,23 +9,69 @@ version: 2.1
 parameters:
   ubuntu-2004-docker-image:
     type: string
-    # solbuildpackpusher/solidity-buildpack-deps:ubuntu2004-6
-    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:da44d7f78e093f7f0415abf07f7c1fd1c2ed4fa65fefea428821a05186c42ec9"
+    # solbuildpackpusher/solidity-buildpack-deps:ubuntu2004-8
+    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:9c3cdfc1d573d1ca3edacd892590a9a83487a1f746a6ca2093d7e009818c5179"
   ubuntu-2004-clang-docker-image:
     type: string
-    # solbuildpackpusher/solidity-buildpack-deps:ubuntu2004.clang-6
-    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:c78dd9c48d393b57afe053aeb2d0d358a9f31ac85039a181724c2f8408d0bcf8"
+    # solbuildpackpusher/solidity-buildpack-deps:ubuntu2004.clang-8
+    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:61232feea23c8c57e82cf5fae890f8b86bbec353cdc04f2fcba383ca589e1d8b"
   ubuntu-1604-clang-ossfuzz-docker-image:
     type: string
-    # solbuildpackpusher/solidity-buildpack-deps:ubuntu1604.clang.ossfuzz-9
-    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:5078e1d74ab6f4329e9218c2d8c0ebe2d42817a3d4c3c62ce887100cbe9bc739"
+    # solbuildpackpusher/solidity-buildpack-deps:ubuntu1604.clang.ossfuzz-13
+    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:c26a7ffc9fc243a4ec3105b9dc1edcdd964ad0e9665c83172b7ebda74bbf3021"
   emscripten-docker-image:
     type: string
-    # solbuildpackpusher/solidity-buildpack-deps:emscripten-5
-    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:d28afb9624c2352ea40f157d1a321ffac77f54a21e33a8e8744f9126b780ded4"
+    # solbuildpackpusher/solidity-buildpack-deps:emscripten-7
+    default: "solbuildpackpusher/solidity-buildpack-deps@sha256:9ffcd0944433fe100e9433f2aa9ba5c21e096e758ad8a05a4a76feaed3d1f463"
+  evm-version:
+    type: string
+    default: london
 
 orbs:
   win: circleci/windows@2.2.0
+
+commands:
+  gitter_notify_unless_pr:
+    description: "Posts a notification to the main room on Gitter (if not running on a PR)."
+    parameters:
+      event:
+        type: enum
+        enum: ["failure", "success"]
+      condition:
+        type: string
+    steps:
+      - run:
+          name: "Gitter notification"
+          when: << parameters.condition >>
+          command: |
+            # FIXME: Checking $CIRCLE_PULL_REQUEST would be better than hard-coding branch names
+            # but it's broken. CircleCI associates runs on develop/breaking with random old PRs.
+            [[ $CIRCLE_BRANCH == develop || $CIRCLE_BRANCH == breaking ]] || { echo "Running on a PR or a feature branch - notification skipped."; exit 0; }
+
+            [[ "<< parameters.event >>" == "failure" ]] && message=" ❌ Nightly job **${CIRCLE_JOB}** failed on **${CIRCLE_BRANCH}**. Please see [build #${CIRCLE_BUILD_NUM}](${CIRCLE_BUILD_URL}) for details."
+            [[ "<< parameters.event >>" == "success" ]] && message=" ✅ Nightly job **${CIRCLE_JOB}** succeeded on **${CIRCLE_BRANCH}**. Please see [build #${CIRCLE_BUILD_NUM}](${CIRCLE_BUILD_URL}) for details."
+
+            curl "https://api.gitter.im/v1/rooms/${GITTER_NOTIFY_ROOM_ID}/chatMessages" \
+              --request POST \
+              --include \
+              --header "Content-Type: application/json" \
+              --header "Accept: application/json" \
+              --header "Authorization: Bearer ${GITTER_API_TOKEN}" \
+              --data "{\"text\":\"${message}\"}"
+
+  gitter_notify_failure_unless_pr:
+    description: "Posts a failure notification to the main room on Gitter (if not running on a PR)."
+    steps:
+      - gitter_notify_unless_pr:
+          event: failure
+          condition: on_fail
+
+  gitter_notify_success_unless_pr:
+    description: "Posts a success notification to the main room on Gitter (if not running on a PR)."
+    steps:
+      - gitter_notify_unless_pr:
+          event: success
+          condition: on_success
 
 defaults:
 
@@ -50,6 +96,25 @@ defaults:
       name: Correctness proofs for optimization rules
       command: scripts/run_proofs.sh
 
+  - run_soltest: &run_soltest
+      name: soltest
+      no_output_timeout: 30m
+      command: ./.circleci/soltest.sh
+
+  - run_soltest_all: &run_soltest_all
+      name: soltest_all
+      no_output_timeout: 30m
+      command: ./.circleci/soltest_all.sh
+
+  - run_cmdline_tests: &run_cmdline_tests
+      name: command line tests
+      no_output_timeout: 30m
+      command: ./test/cmdlineTests.sh
+
+  - run_docs_pragma_min_version: &run_docs_pragma_min_version
+      name: docs pragma version check
+      command: ./scripts/docs_version_pragma_check.sh
+
   # --------------------------------------------------------------------------
   # Artifacts Templates
 
@@ -69,9 +134,13 @@ defaults:
       path: upload/
 
   # compiled tool executable target
-  - artifacts_tools: &artifacts_tools
+  - artifact_solidity_upgrade: &artifact_solidity_upgrade
       path: build/tools/solidity-upgrade
       destination: solidity-upgrade
+
+  - artifact_yul_phaser: &artifact_yul_phaser
+      path: build/tools/yul-phaser
+      destination: yul-phaser
 
   # compiled executable targets
   - artifacts_executables: &artifacts_executables
@@ -105,57 +174,26 @@ defaults:
       destination: test_results/
 
   # --------------------------------------------------------------------------
-  # Tests Templates
+  # Step Templates
 
   # store_test_results helper
   - store_test_results: &store_test_results
       path: test_results/
 
-  - run_soltest: &run_soltest
-      name: soltest
-      no_output_timeout: 30m
-      command: ./.circleci/soltest.sh
-
-  - run_soltest_all: &run_soltest_all
-      name: soltest_all
-      no_output_timeout: 30m
-      command: ./.circleci/soltest_all.sh
-
-  - run_cmdline_tests: &run_cmdline_tests
-      name: command line tests
-      no_output_timeout: 30m
-      command: ./test/cmdlineTests.sh
-
-  - run_docs_pragma_min_version: &run_docs_pragma_min_version
-      name: docs pragma version check
-      command: ./scripts/docs_version_pragma_check.sh
-
-  - test_ubuntu1604_clang: &test_ubuntu1604_clang
-      docker:
-        - image: << pipeline.parameters.ubuntu-1604-clang-ossfuzz-docker-image >>
+  - steps_soltest: &steps_soltest
       steps:
         - checkout
         - attach_workspace:
             at: build
+        # NOTE: Different build jobs produce different soltest executables (release/debug,
+        # clang/gcc, windows/linux/macos, etc.). The executable used by these steps comes from the
+        # attached workspace and we only see the items added to the workspace by jobs we depend on.
         - run: *run_soltest
         - store_test_results: *store_test_results
         - store_artifacts: *artifacts_test_results
+        - gitter_notify_failure_unless_pr
 
-  - test_ubuntu2004_clang: &test_ubuntu2004_clang
-      docker:
-        - image: << pipeline.parameters.ubuntu-2004-clang-docker-image >>
-      steps:
-        - checkout
-        - attach_workspace:
-            at: build
-        - run: *run_soltest
-        - store_test_results: *store_test_results
-        - store_artifacts: *artifacts_test_results
-
-  - test_ubuntu2004: &test_ubuntu2004
-      docker:
-        - image: << pipeline.parameters.ubuntu-2004-docker-image >>
-      parallelism: 6
+  - steps_soltest_all: &steps_soltest_all
       steps:
         - checkout
         - attach_workspace:
@@ -163,28 +201,111 @@ defaults:
         - run: *run_soltest_all
         - store_test_results: *store_test_results
         - store_artifacts: *artifacts_test_results
+        - gitter_notify_failure_unless_pr
 
-  - test_asan: &test_asan
-      <<: *test_ubuntu2004
+  - steps_cmdline_tests: &steps_cmdline_tests
       steps:
-      - checkout
-      - attach_workspace:
-          at: build
-      - run:
-          <<: *run_soltest
-      - store_test_results: *store_test_results
-      - store_artifacts: *artifacts_test_results
+        - checkout
+        - attach_workspace:
+            at: build
+        - run: *run_cmdline_tests
+        - store_test_results: *store_test_results
+        - store_artifacts: *artifacts_test_results
+        - gitter_notify_failure_unless_pr
 
-  - test_asan_clang: &test_asan_clang
-      <<: *test_ubuntu2004_clang
-      steps:
-      - checkout
-      - attach_workspace:
-          at: build
-      - run:
-          <<: *run_soltest
-      - store_test_results: *store_test_results
-      - store_artifacts: *artifacts_test_results
+  # --------------------------------------------------------------------------
+  # Base Image Templates
+
+  - base_ubuntu1604_clang: &base_ubuntu1604_clang
+      docker:
+        - image: << pipeline.parameters.ubuntu-1604-clang-ossfuzz-docker-image >>
+      environment:
+        TERM: xterm
+
+  - base_ubuntu2004_clang: &base_ubuntu2004_clang
+      docker:
+        - image: << pipeline.parameters.ubuntu-2004-clang-docker-image >>
+      environment:
+        TERM: xterm
+        CC: clang
+        CXX: clang++
+        MAKEFLAGS: -j 3
+
+  - base_ubuntu2004_clang_xlarge: &base_ubuntu2004_clang_xlarge
+      <<: *base_ubuntu2004_clang
+      resource_class: xlarge
+      environment:
+        TERM: xterm
+        CC: clang
+        CXX: clang++
+        MAKEFLAGS: -j 10
+
+  - base_ubuntu2004: &base_ubuntu2004
+      docker:
+        - image: << pipeline.parameters.ubuntu-2004-docker-image >>
+      environment:
+        TERM: xterm
+
+  - base_ubuntu2004_xlarge: &base_ubuntu2004_xlarge
+      <<: *base_ubuntu2004
+      resource_class: xlarge
+      environment:
+        TERM: xterm
+        MAKEFLAGS: -j 10
+
+  - base_buildpack_focal: &base_buildpack_focal
+      docker:
+        - image: buildpack-deps:focal
+      environment:
+        TERM: xterm
+
+  - base_buildpack_latest: &base_buildpack_latest
+      docker:
+        - image: buildpack-deps:latest
+      environment:
+        TERM: xterm
+
+  - base_archlinux: &base_archlinux
+      docker:
+        - image: archlinux:base
+      environment:
+        TERM: xterm
+
+  - base_win_powershell: &base_win_powershell
+      executor:
+        name: win/default
+        shell: powershell.exe
+
+  - base_win_cmd: &base_win_cmd
+      executor:
+        name: win/default
+        shell: cmd.exe
+
+  - base_osx: &base_osx
+      macos:
+        xcode: "11.0.0"
+      environment:
+        TERM: xterm
+
+  - base_ems_xlarge: &base_ems_xlarge
+      docker:
+        - image: << pipeline.parameters.emscripten-docker-image >>
+      resource_class: xlarge
+      environment:
+        TERM: xterm
+        MAKEFLAGS: -j 10
+
+  - base_python: &base_python
+      docker:
+        - image: circleci/python:3.6
+      environment:
+        TERM: xterm
+
+  - base_node_latest: &base_node_latest
+      docker:
+        - image: circleci/node
+      environment:
+        TERM: xterm
 
   # --------------------------------------------------------------------------
   # Workflow Templates
@@ -239,6 +360,11 @@ defaults:
       requires:
         - b_ubu_asan_clang
 
+  - workflow_ubuntu2004_ubsan_clang: &workflow_ubuntu2004_ubsan_clang
+      <<: *workflow_trigger_on_tags
+      requires:
+        - b_ubu_ubsan_clang
+
   - workflow_emscripten: &workflow_emscripten
       <<: *workflow_trigger_on_tags
       requires:
@@ -259,36 +385,11 @@ defaults:
       requires:
         - b_win_release
 
-  # --------------------------------------------------------------------------
-  # Notification Templates
-  - gitter_notify_failure: &gitter_notify_failure
-      name: Gitter notify failure
-      command: >-
-        curl -X POST -i
-        -i -H "Content-Type: application/json"
-        -H "Accept: application/json"
-        -H "Authorization: Bearer $GITTER_API_TOKEN" "https://api.gitter.im/v1/rooms/$GITTER_NOTIFY_ROOM_ID/chatMessages"
-        -d '{"text":" ❌ Nightly job **'$CIRCLE_JOB'** failed on **'$CIRCLE_BRANCH'**. Please see '$CIRCLE_BUILD_URL' for details."}'
-      when: on_fail
-
-  - gitter_notify_success: &gitter_notify_success
-      name: Gitter notify success
-      command: >-
-        curl -X POST -i
-        -i -H "Content-Type: application/json"
-        -H "Accept: application/json"
-        -H "Authorization: Bearer $GITTER_API_TOKEN" "https://api.gitter.im/v1/rooms/$GITTER_NOTIFY_ROOM_ID/chatMessages"
-        -d '{"text":" ✅ Nightly job **'$CIRCLE_JOB'** succeeded on **'$CIRCLE_BRANCH'**. Please see '$CIRCLE_BUILD_URL' for details."}'
-      when: on_success
-
 # -----------------------------------------------------------------------------------------------
 jobs:
 
   chk_spelling:
-    docker:
-      - image: circleci/python:3.6
-    environment:
-      TERM: xterm
+    <<: *base_python
     steps:
       - checkout
       - attach_workspace:
@@ -300,12 +401,10 @@ jobs:
       - run:
           name: Check spelling
           command: ~/.local/bin/codespell -S "*.enc,.git,Dockerfile*" -I ./scripts/codespell_whitelist.txt
+      - gitter_notify_failure_unless_pr
 
   chk_docs_examples:
-    docker:
-      - image: circleci/node
-    environment:
-      TERM: xterm
+    <<: *base_node_latest
     steps:
       - checkout
       - attach_workspace:
@@ -316,10 +415,10 @@ jobs:
       - run:
           name: Test Docs examples
           command: ./test/docsCodeStyle.sh
+      - gitter_notify_failure_unless_pr
 
   chk_coding_style:
-    docker:
-      - image: buildpack-deps:focal
+    <<: *base_buildpack_focal
     steps:
       - checkout
       - run:
@@ -334,19 +433,19 @@ jobs:
       - run:
           name: Check for broken symlinks
           command: ./scripts/check_symlinks.sh
+      - gitter_notify_failure_unless_pr
 
   chk_errorcodes:
-    docker:
-      - image: circleci/python:3.6
+    <<: *base_python
     steps:
       - checkout
       - run:
           name: Check for error codes
           command: ./scripts/error_codes.py --check
+      - gitter_notify_failure_unless_pr
 
   chk_pylint:
-    docker:
-      - image: buildpack-deps:focal
+    <<: *base_buildpack_focal
     steps:
       - checkout
       - run:
@@ -359,24 +458,22 @@ jobs:
       - run:
           name: Linting Python Scripts
           command: ./scripts/pylint_all.py
+      - gitter_notify_failure_unless_pr
 
   chk_antlr_grammar:
-    docker:
-      - image: buildpack-deps:focal
+    <<: *base_buildpack_focal
     steps:
       - checkout
       - run:
           name: Install Java
-          command: apt -q update && apt install -y openjdk-14-jdk
+          command: apt -q update && apt install -y openjdk-16-jdk
       - run:
           name: Run tests
           command: ./scripts/test_antlr_grammar.sh
+      - gitter_notify_failure_unless_pr
 
   chk_buglist:
-    docker:
-      - image: circleci/node
-    environment:
-      TERM: xterm
+    <<: *base_node_latest
     steps:
       - checkout
       - run:
@@ -388,12 +485,10 @@ jobs:
       - run:
           name: Test buglist
           command: ./test/buglistTests.js
+      - gitter_notify_failure_unless_pr
 
   chk_proofs:
-    docker:
-      - image: buildpack-deps:latest
-    environment:
-      TERM: xterm
+    <<: *base_buildpack_latest
     steps:
       - checkout
       - run:
@@ -403,54 +498,70 @@ jobs:
             apt-get -qy install python3-pip
             pip3 install --user z3-solver
       - run: *run_proofs
+      - gitter_notify_failure_unless_pr
 
   chk_docs_pragma_min_version:
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
-    environment:
-      TERM: xterm
+    <<: *base_ubuntu2004
     steps:
       - checkout
       - run: *run_docs_pragma_min_version
+      - gitter_notify_failure_unless_pr
 
-  t_pyscripts_ubu:
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
+  t_ubu_pyscripts:
+    <<: *base_ubuntu2004
     steps:
       - checkout
       - run:
           name: Python unit tests
           command: python3 test/pyscriptTests.py
+      - gitter_notify_failure_unless_pr
 
-  t_pyscripts_win:
-    executor:
-      name: win/default
-      shell: powershell.exe
+  t_win_pyscripts:
+    <<: *base_win_powershell
     steps:
       - run: git config --global core.autocrlf false
       - checkout
       - run:
           name: Python unit tests
           command: python.exe test/pyscriptTests.py
+      - gitter_notify_failure_unless_pr
 
-  b_ubu_clang: &build_ubuntu2004_clang
-    resource_class: xlarge
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-clang-docker-image >>
+  b_ubu: &b_ubu
+    <<: *base_ubuntu2004_xlarge
+    steps:
+      - checkout
+      - run: *run_build
+      - store_artifacts: *artifacts_solc
+      - store_artifacts: *artifact_solidity_upgrade
+      - store_artifacts: *artifact_yul_phaser
+      - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
+
+  # x64 ASAN build, for testing for memory related bugs
+  b_ubu_asan: &b_ubu_asan
+    <<: *base_ubuntu2004_xlarge
     environment:
-      CC: clang
-      CXX: clang++
+      CMAKE_OPTIONS: -DSANITIZE=address
       MAKEFLAGS: -j 10
+      CMAKE_BUILD_TYPE: Release
     steps:
       - checkout
       - run: *run_build
       - store_artifacts: *artifacts_solc
       - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
 
+  b_ubu_clang: &b_ubu_clang
+    <<: *base_ubuntu2004_clang_xlarge
+    steps:
+      - checkout
+      - run: *run_build
+      - store_artifacts: *artifacts_solc
+      - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
 
-  b_ubu_asan_clang: &build_ubuntu2004_clang
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-clang-docker-image >>
+  b_ubu_asan_clang: &b_ubu_asan_clang
+    <<: *base_ubuntu2004_clang
     environment:
       CC: clang
       CXX: clang++
@@ -461,28 +572,30 @@ jobs:
       - run: *run_build
       - store_artifacts: *artifacts_solc
       - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
 
-  b_ubu: &build_ubuntu2004
-    resource_class: xlarge
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
+  b_ubu_ubsan_clang: &b_ubu_ubsan_clang
+    <<: *base_ubuntu2004_clang
     environment:
-      MAKEFLAGS: -j 10
+      CC: clang
+      CXX: clang++
+      CMAKE_OPTIONS: -DSANITIZE=undefined
+      MAKEFLAGS: -j 3
     steps:
       - checkout
       - run: *run_build
       - store_artifacts: *artifacts_solc
-      - store_artifacts: *artifacts_tools
       - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
 
-  b_ubu_release: &build_ubuntu2004_release
-    <<: *build_ubuntu2004
+  b_ubu_release: &b_ubu_release
+    <<: *b_ubu
     environment:
       FORCE_RELEASE: ON
       MAKEFLAGS: -j 10
 
   b_ubu_static:
-    <<: *build_ubuntu2004
+    <<: *base_ubuntu2004_xlarge
     environment:
       MAKEFLAGS: -j 10
       CMAKE_OPTIONS: -DCMAKE_BUILD_TYPE=Release -DUSE_Z3_DLOPEN=ON -DUSE_CVC4=OFF -DSOLC_STATIC_STDLIBS=ON
@@ -493,9 +606,10 @@ jobs:
           name: strip binary
           command: strip build/solc/solc
       - store_artifacts: *artifacts_solc
+      - gitter_notify_failure_unless_pr
 
   b_ubu_codecov:
-    <<: *build_ubuntu2004
+    <<: *base_ubuntu2004_xlarge
     environment:
       COVERAGE: ON
       CMAKE_BUILD_TYPE: Debug
@@ -504,11 +618,13 @@ jobs:
       - checkout
       - run: *run_build
       - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
 
   t_ubu_codecov:
-    <<: *test_ubuntu2004
+    <<: *base_ubuntu2004
+    parallelism: 6
     environment:
-      EVM: constantinople
+      EVM: << pipeline.parameters.evm-version >>
       OPTIMIZE: 1
     steps:
       - checkout
@@ -525,11 +641,12 @@ jobs:
           name: "Coverage: All"
           command: codecov --flags all --gcov-root build
       - store_artifacts: *artifacts_test_results
+      - gitter_notify_failure_unless_pr
 
   # Builds in C++20 mode and uses debug build in order to speed up.
   # Do *NOT* store any artifacts or workspace as we don't run tests on this build.
   b_ubu_cxx20:
-    <<: *build_ubuntu2004
+    <<: *base_ubuntu2004_xlarge
     environment:
       CMAKE_BUILD_TYPE: Debug
       CMAKE_OPTIONS: -DCMAKE_CXX_STANDARD=20 -DUSE_CVC4=OFF
@@ -537,23 +654,19 @@ jobs:
     steps:
       - checkout
       - run: *run_build
+      - gitter_notify_failure_unless_pr
 
-  b_ubu_ossfuzz: &build_ubuntu1604_clang
-    docker:
-      - image: << pipeline.parameters.ubuntu-1604-clang-ossfuzz-docker-image >>
-    environment:
-      CC: clang
-      CXX: clang++
-      TERM: xterm
-      MAKEFLAGS: -j 3
+  b_ubu_ossfuzz: &b_ubu_ossfuzz
+    <<: *base_ubuntu1604_clang
     steps:
       - checkout
       - run: *setup_prerelease_commit_hash
       - run: *run_build_ossfuzz
       - persist_to_workspace: *artifacts_executables_ossfuzz
+      - gitter_notify_failure_unless_pr
 
   t_ubu_ossfuzz: &t_ubu_ossfuzz
-    <<: *test_ubuntu1604_clang
+    <<: *base_ubuntu1604_clang
     steps:
       - checkout
       - attach_workspace:
@@ -564,16 +677,13 @@ jobs:
             git clone https://github.com/ethereum/solidity-fuzzing-corpus /tmp/solidity-fuzzing-corpus
             mkdir -p test_results
             scripts/regressions.py -o test_results
-      - run: *gitter_notify_failure
-      - run: *gitter_notify_success
       - store_test_results: *store_test_results
       - store_artifacts: *artifacts_test_results
+      - gitter_notify_failure_unless_pr
+      - gitter_notify_success_unless_pr
 
   b_archlinux:
-    docker:
-      # FIXME: Newer releases won't work until CircleCI updates its host machines.
-      # See https://github.com/ethereum/solidity/pull/11332
-      - image: archlinux:base-20210131.0.14634
+    <<: *base_archlinux
     environment:
       TERM: xterm
       MAKEFLAGS: -j 3
@@ -586,10 +696,10 @@ jobs:
       - run: *run_build
       - store_artifacts: *artifacts_solc
       - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
 
   b_osx:
-    macos:
-      xcode: "11.0.0"
+    <<: *base_osx
     environment:
       TERM: xterm
       CMAKE_BUILD_TYPE: Release
@@ -598,14 +708,14 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - dependencies-osx-{{ checksum ".circleci/osx_install_dependencies.sh" }}
+            - dependencies-osx-{{ arch }}-{{ checksum ".circleci/osx_install_dependencies.sh" }}
       # DO NOT EDIT between here and save_cache, but rather edit ./circleci/osx_install_dependencies.sh
       # WARNING! If you do edit anything here instead, remember to invalidate the cache manually.
       - run:
           name: Install build dependencies
           command: ./.circleci/osx_install_dependencies.sh
       - save_cache:
-          key: dependencies-osx-{{ checksum ".circleci/osx_install_dependencies.sh" }}
+          key: dependencies-osx-{{ arch }}-{{ checksum ".circleci/osx_install_dependencies.sh" }}
           paths:
             - /usr/local/bin
             - /usr/local/sbin
@@ -615,54 +725,49 @@ jobs:
             - /usr/local/Homebrew
       - run: *run_build
       - store_artifacts: *artifacts_solc
-      - store_artifacts: *artifacts_tools
+      - store_artifacts: *artifact_solidity_upgrade
+      - store_artifacts: *artifact_yul_phaser
       - persist_to_workspace:
           root: .
           paths:
             - build/solc/solc
             - build/test/soltest
             - build/test/tools/solfuzzer
+      - gitter_notify_failure_unless_pr
 
   t_osx_soltest:
-    macos:
-      xcode: "11.0.0"
+    <<: *base_osx
     environment:
-      EVM: constantinople
+      EVM: << pipeline.parameters.evm-version >>
       OPTIMIZE: 0
       TERM: xterm
     steps:
       - checkout
       - restore_cache:
           keys:
-            - dependencies-osx-{{ checksum ".circleci/osx_install_dependencies.sh" }}
+            - dependencies-osx-{{ arch }}-{{ checksum ".circleci/osx_install_dependencies.sh" }}
       - attach_workspace:
           at: .
       - run: *run_soltest
       - store_test_results: *store_test_results
       - store_artifacts: *artifacts_test_results
+      - gitter_notify_failure_unless_pr
 
   t_osx_cli:
-    macos:
-      xcode: "11.0.0"
-    environment:
-      TERM: xterm
+    <<: *base_osx
     steps:
       - checkout
       - restore_cache:
           keys:
-            - dependencies-osx-{{ checksum ".circleci/osx_install_dependencies.sh" }}
+            - dependencies-osx-{{ arch }}-{{ checksum ".circleci/osx_install_dependencies.sh" }}
       - attach_workspace:
           at: .
       - run: *run_cmdline_tests
       - store_artifacts: *artifacts_test_results
+      - gitter_notify_failure_unless_pr
 
   b_ems:
-    resource_class: xlarge
-    docker:
-      - image: << pipeline.parameters.emscripten-docker-image >>
-    environment:
-      MAKEFLAGS: -j 10
-      TERM: xterm
+    <<: *base_ems_xlarge
     steps:
       - checkout
       - run:
@@ -680,23 +785,10 @@ jobs:
           paths:
             - soljson.js
             - version.txt
-
-  # x64 ASAN build, for testing for memory related bugs
-  b_ubu_asan: &b_ubu_asan
-    <<: *build_ubuntu2004
-    environment:
-      CMAKE_OPTIONS: -DSANITIZE=address
-      MAKEFLAGS: -j 10
-      CMAKE_BUILD_TYPE: Release
-    steps:
-      - checkout
-      - run: *run_build
-      - store_artifacts: *artifacts_solc
-      - persist_to_workspace: *artifacts_executables
+      - gitter_notify_failure_unless_pr
 
   b_docs:
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
+    <<: *base_ubuntu2004
     steps:
       - checkout
       - run: *setup_prerelease_commit_hash
@@ -706,111 +798,97 @@ jobs:
       - store_artifacts:
           path: docs/_build/html/
           destination: docs-html
+      - gitter_notify_failure_unless_pr
 
-  t_ubu_soltest: &t_ubu_soltest
-    <<: *test_ubuntu2004
+  t_ubu_soltest_all: &t_ubu_soltest_all
+    <<: *base_ubuntu2004
+    parallelism: 6
+    <<: *steps_soltest_all
 
   t_archlinux_soltest: &t_archlinux_soltest
-      docker:
-        # FIXME: Newer releases won't work until CircleCI updates its host machines.
-        # See https://github.com/ethereum/solidity/pull/11332
-        - image: archlinux:base-20210131.0.14634
-      environment:
-        EVM: constantinople
-        OPTIMIZE: 0
-        TERM: xterm
-        # For Archlinux we do not have prebuilt docker images and we would need to build evmone from source,
-        # thus we forgo semantics tests to speed things up.
-        SOLTEST_FLAGS: --no-semantic-tests
-      steps:
-        - run:
-            name: Install runtime dependencies
-            command: |
-              pacman --noconfirm -Syu --noprogressbar --needed base-devel boost cmake z3 cvc4 git openssh tar
-        - checkout
-        - attach_workspace:
-            at: build
-        - run: *run_soltest
-        - store_test_results: *store_test_results
-        - store_artifacts: *artifacts_test_results
+    <<: *base_archlinux
+    environment:
+      EVM: << pipeline.parameters.evm-version >>
+      OPTIMIZE: 0
+      TERM: xterm
+      # For Archlinux we do not have prebuilt docker images and we would need to build evmone from source,
+      # thus we forgo semantics tests to speed things up.
+      SOLTEST_FLAGS: --no-semantic-tests
+    steps:
+      - run:
+          name: Install runtime dependencies
+          command: |
+            pacman --noconfirm -Syu --noprogressbar --needed base-devel boost cmake z3 cvc4 git openssh tar
+      - when:
+          condition: true
+          <<: *steps_soltest
 
   t_ubu_soltest_enforce_yul: &t_ubu_soltest_enforce_yul
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
+    <<: *base_ubuntu2004
     environment:
-      EVM: constantinople
+      EVM: << pipeline.parameters.evm-version >>
       SOLTEST_FLAGS: --enforce-via-yul
       OPTIMIZE: 0
       TERM: xterm
-    steps:
-      - checkout
-      - attach_workspace:
-          at: build
-      - run: *run_soltest
-      - store_test_results: *store_test_results
-      - store_artifacts: *artifacts_test_results
-
+    <<: *steps_soltest
 
   t_ubu_clang_soltest: &t_ubu_clang_soltest
-    <<: *test_ubuntu2004_clang
+    <<: *base_ubuntu2004_clang
     environment:
-      EVM: constantinople
+      EVM: << pipeline.parameters.evm-version >>
       OPTIMIZE: 0
+    <<: *steps_soltest
 
-  t_ubu_release_soltest: &t_ubu_release_soltest
-    <<: *t_ubu_soltest
+  t_ubu_release_soltest_all: &t_ubu_release_soltest_all
+    # NOTE: This definition is identical to t_ubu_soltest_all but in the workflow we make it depend on
+    # a different job (b_ubu_release) so the workspace it attaches contains a different executable.
+    <<: *t_ubu_soltest_all
 
   t_ubu_cli: &t_ubu_cli
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
-    environment:
-      TERM: xterm
-    steps:
-      - checkout
-      - attach_workspace:
-          at: build
-      - run: *run_cmdline_tests
-      - store_test_results: *store_test_results
-      - store_artifacts: *artifacts_test_results
+    <<: *base_ubuntu2004
+    <<: *steps_cmdline_tests
 
   t_ubu_release_cli: &t_ubu_release_cli
     <<: *t_ubu_cli
 
   t_ubu_asan_cli:
-    <<: *t_ubu_cli
+    <<: *base_ubuntu2004
     environment:
       TERM: xterm
       ASAN_OPTIONS: check_initialization_order=true:detect_stack_use_after_return=true:strict_init_order=true:strict_string_checks=true:detect_invalid_pointer_pairs=2
-    steps:
-      - checkout
-      - attach_workspace:
-          at: build
-      - run:
-          <<: *run_cmdline_tests
-      - store_test_results: *store_test_results
-      - store_artifacts: *artifacts_test_results
+    <<: *steps_cmdline_tests
 
-  t_ubu_asan_constantinople:
-    <<: *test_asan
+  t_ubu_asan_soltest:
+    <<: *base_ubuntu2004
+    parallelism: 6
     environment:
-      EVM: constantinople
+      EVM: << pipeline.parameters.evm-version >>
       OPTIMIZE: 0
       SOLTEST_FLAGS: --no-smt
       ASAN_OPTIONS: check_initialization_order=true:detect_stack_use_after_return=true:strict_init_order=true:strict_string_checks=true:detect_invalid_pointer_pairs=2
+    <<: *steps_soltest
 
-  t_ubu_asan_constantinople_clang:
-    <<: *test_asan_clang
+  t_ubu_asan_clang_soltest:
+    <<: *base_ubuntu2004_clang
     environment:
-      EVM: constantinople
+      EVM: << pipeline.parameters.evm-version >>
       OPTIMIZE: 0
       SOLTEST_FLAGS: --no-smt
       ASAN_OPTIONS: check_initialization_order=true:detect_stack_use_after_return=true:strict_init_order=true:strict_string_checks=true:detect_invalid_pointer_pairs=2
+    <<: *steps_soltest
+
+  t_ubu_ubsan_clang_soltest:
+    <<: *base_ubuntu2004_clang
+    environment:
+      EVM: << pipeline.parameters.evm-version >>
+    <<: *steps_soltest
+
+  t_ubu_ubsan_clang_cli:
+    <<: *base_ubuntu2004_clang
+    <<: *steps_cmdline_tests
 
   t_ems_solcjs:
-    docker:
-      - image: buildpack-deps:latest
-    environment:
-      TERM: xterm
+    <<: *base_ubuntu2004
     steps:
       - checkout
       - attach_workspace:
@@ -819,7 +897,7 @@ jobs:
           name: Install test dependencies
           command: |
             apt-get update
-            apt-get install -qqy --no-install-recommends nodejs npm cvc4
+            apt-get install -qqy --no-install-recommends nodejs npm
       - run:
           name: Test solcjs
           no_output_timeout: 30m
@@ -827,6 +905,33 @@ jobs:
             node --version
             npm --version
             test/externalTests/solc-js/solc-js.sh /tmp/workspace/soljson.js $(cat /tmp/workspace/version.txt)
+      - gitter_notify_failure_unless_pr
+
+  t_ems_ext_hardhat:
+    <<: *base_node_latest
+    environment:
+      TERM: xterm
+      HARDHAT_TESTS_SOLC_PATH: /tmp/workspace/soljson.js
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run: git clone --depth 1 https://github.com/nomiclabs/hardhat.git
+      - run:
+          name: Install dependencies
+          command: |
+            cd hardhat
+            yarn
+      - run:
+          name: Run hardhat-core test suite
+          command: |
+            HARDHAT_TESTS_SOLC_VERSION=$(scripts/get_version.sh)
+            export HARDHAT_TESTS_SOLC_VERSION
+
+            # NOTE: This is expected to work without running `yarn build` first.
+            cd hardhat/packages/hardhat-core
+            yarn test
+      - gitter_notify_failure_unless_pr
 
   t_ems_ext:
     parameters:
@@ -838,9 +943,6 @@ jobs:
       nodejs_version:
         type: integer
         default: 14
-      gitter_notify:
-        type: boolean
-        default: no
     docker:
       - image: circleci/node:<<parameters.nodejs_version>>
     environment:
@@ -859,29 +961,23 @@ jobs:
           name: External <<parameters.project>> tests
           command: |
             test/externalTests/<<parameters.project>>.sh /tmp/workspace/soljson.js
-      - when:
-          condition: <<parameters.gitter_notify>>
-          steps:
-            - run: *gitter_notify_failure
-            - run: *gitter_notify_success
+      - gitter_notify_failure_unless_pr
 
   b_win: &b_win
-    executor:
-      name: win/default
-      shell: powershell.exe
+    <<: *base_win_powershell
     steps:
       # NOTE: Not disabling git's core.autocrlf here because we want to build using the typical Windows config.
       - checkout
       - restore_cache:
           keys:
-            - dependencies-win-{{ checksum "scripts/install_deps.ps1" }}
+            - dependencies-win-{{ arch }}-{{ checksum "scripts/install_deps.ps1" }}
       # DO NOT EDIT between here and save_cache, but rather edit .\scripts\install_deps.ps1
       # WARNING! If you do edit anything here instead, remember to invalidate the cache manually.
       - run:
           name: "Installing dependencies"
           command: .\scripts\install_deps.ps1
       - save_cache:
-          key: dependencies-win-{{ checksum "scripts/install_deps.ps1" }}
+          key: dependencies-win-{{ arch }}-{{ checksum "scripts/install_deps.ps1" }}
           paths:
             - .\deps
       - run:
@@ -896,16 +992,15 @@ jobs:
           paths:
             - .\solc\*\solc.exe
             - .\test\*\soltest.exe
+      - gitter_notify_failure_unless_pr
 
   b_win_release:
     <<: *b_win
     environment:
       FORCE_RELEASE: ON
 
-  t_win: &t_win
-    executor:
-      name: win/default
-      shell: powershell.exe
+  t_win_soltest: &t_win_soltest
+    <<: *base_win_powershell
     steps:
       # NOTE: Git's default core.autocrlf is fine for running soltest. We get additional coverage
       # for files using CRLF that way.
@@ -920,13 +1015,13 @@ jobs:
           command: .circleci/soltest.ps1
       - store_test_results: *store_test_results
       - store_artifacts: *artifacts_test_results
+      - gitter_notify_failure_unless_pr
 
-  t_win_release:
-    <<: *t_win
+  t_win_release_soltest:
+    <<: *t_win_soltest
 
   b_bytecode_ubu:
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
+    <<: *base_ubuntu2004
     steps:
       - checkout
       - attach_workspace:
@@ -944,12 +1039,10 @@ jobs:
           paths:
             - bytecode-report-ubuntu-json.txt
             - bytecode-report-ubuntu-cli.txt
+      - gitter_notify_failure_unless_pr
 
   b_bytecode_osx:
-    macos:
-      xcode: "11.0.0"
-    environment:
-      TERM: xterm
+    <<: *base_osx
     steps:
       - checkout
       - attach_workspace:
@@ -967,11 +1060,10 @@ jobs:
           paths:
             - bytecode-report-osx-json.txt
             - bytecode-report-osx-cli.txt
+      - gitter_notify_failure_unless_pr
 
   b_bytecode_win:
-    executor:
-      name: win/default
-      shell: cmd.exe
+    <<: *base_win_cmd
     steps:
       # NOTE: For bytecode generation we need the input files to be byte-for-byte identical on all
       # platforms so line ending conversions must absolutely be disabled.
@@ -992,10 +1084,10 @@ jobs:
           paths:
             - bytecode-report-windows-json.txt
             - bytecode-report-windows-cli.txt
+      - gitter_notify_failure_unless_pr
 
   b_bytecode_ems:
-    docker:
-      - image: circleci/node:14
+    <<: *base_node_latest
     environment:
       SOLC_EMSCRIPTEN: "On"
     steps:
@@ -1009,10 +1101,10 @@ jobs:
           root: .
           paths:
             - bytecode-report-emscripten.txt
+      - gitter_notify_failure_unless_pr
 
   t_bytecode_compare:
-    docker:
-      - image: << pipeline.parameters.ubuntu-2004-docker-image >>
+    <<: *base_ubuntu2004
     environment:
       REPORT_FILES: |
         bytecode-report-emscripten.txt
@@ -1046,6 +1138,7 @@ jobs:
           # NOTE: store_artifacts does not support the 'when' attribute.
           # Fortunately when the artifact does not exist it just says "No artifact files found" and ignores it.
           path: all-bytecode-reports.zip
+      - gitter_notify_failure_unless_pr
 
 workflows:
   version: 2
@@ -1062,8 +1155,8 @@ workflows:
       - chk_errorcodes: *workflow_trigger_on_tags
       - chk_antlr_grammar: *workflow_trigger_on_tags
       - chk_docs_pragma_min_version: *workflow_trigger_on_tags
-      - t_pyscripts_ubu: *workflow_trigger_on_tags
-      - t_pyscripts_win: *workflow_trigger_on_tags
+      - t_ubu_pyscripts: *workflow_trigger_on_tags
+      - t_win_pyscripts: *workflow_trigger_on_tags
 
       # build-only
       - b_docs: *workflow_trigger_on_tags
@@ -1085,7 +1178,7 @@ workflows:
       # Ubuntu build and tests
       - b_ubu: *workflow_trigger_on_tags
       - t_ubu_cli: *workflow_ubuntu2004
-      - t_ubu_soltest: *workflow_ubuntu2004
+      - t_ubu_soltest_all: *workflow_ubuntu2004
       - t_ubu_soltest_enforce_yul: *workflow_ubuntu2004
       - b_ubu_clang: *workflow_trigger_on_tags
       - t_ubu_clang_soltest: *workflow_ubuntu2004_clang
@@ -1093,11 +1186,12 @@ workflows:
       # Ubuntu fake release build and tests
       - b_ubu_release: *workflow_trigger_on_tags
       - t_ubu_release_cli: *workflow_ubuntu2004_release
-      - t_ubu_release_soltest: *workflow_ubuntu2004_release
+      - t_ubu_release_soltest_all: *workflow_ubuntu2004_release
 
       # Emscripten build and tests that take 15 minutes or less
       - b_ems: *workflow_trigger_on_tags
       - t_ems_solcjs: *workflow_emscripten
+      - t_ems_ext_hardhat: *workflow_emscripten
 
       - t_ems_ext:
           <<: *workflow_emscripten
@@ -1155,8 +1249,8 @@ workflows:
       # Windows build and tests
       - b_win: *workflow_trigger_on_tags
       - b_win_release: *workflow_trigger_on_tags
-      - t_win: *workflow_win
-      - t_win_release: *workflow_win_release
+      - t_win_soltest: *workflow_win
+      - t_win_release_soltest: *workflow_win_release
 
       # Bytecode comparison:
       - b_bytecode_ubu:
@@ -1187,7 +1281,6 @@ workflows:
             branches:
               only:
                 - develop
-                - develop_060
 
     jobs:
       # OSSFUZZ builds and (regression) tests
@@ -1201,9 +1294,14 @@ workflows:
       # ASan build and tests
       - b_ubu_asan: *workflow_trigger_on_tags
       - b_ubu_asan_clang: *workflow_trigger_on_tags
-      - t_ubu_asan_constantinople: *workflow_ubuntu2004_asan
-      - t_ubu_asan_constantinople_clang: *workflow_ubuntu2004_asan_clang
+      - t_ubu_asan_soltest: *workflow_ubuntu2004_asan
+      - t_ubu_asan_clang_soltest: *workflow_ubuntu2004_asan_clang
       - t_ubu_asan_cli: *workflow_ubuntu2004_asan
+
+      # UBSan build and tests
+      - b_ubu_ubsan_clang: *workflow_trigger_on_tags
+      - t_ubu_ubsan_clang_soltest: *workflow_ubuntu2004_ubsan_clang
+      - t_ubu_ubsan_clang_cli: *workflow_ubuntu2004_ubsan_clang
 
       # Emscripten build and tests that take more than 15 minutes to execute
       - b_ems: *workflow_trigger_on_tags
@@ -1211,4 +1309,3 @@ workflows:
           <<: *workflow_emscripten
           name: t_ems_test_ext_colony
           project: colony
-          gitter_notify: yes

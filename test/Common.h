@@ -31,19 +31,19 @@ namespace solidity::test
 
 #ifdef _WIN32
 static constexpr auto evmoneFilename = "evmone.dll";
-static constexpr auto evmoneDownloadLink = "https://github.com/ethereum/evmone/releases/download/v0.7.0/evmone-0.7.0-windows-amd64.zip";
+static constexpr auto evmoneDownloadLink = "https://github.com/ethereum/evmone/releases/download/v0.8.0/evmone-0.8.0-windows-amd64.zip";
 static constexpr auto heraFilename = "hera.dll";
 static constexpr auto heraDownloadLink = "https://github.com/ewasm/hera/archive/v0.3.2-evmc8.tar.gz";
 #elif defined(__APPLE__)
 static constexpr auto evmoneFilename = "libevmone.dylib";
-static constexpr auto evmoneDownloadLink = "https://github.com/ethereum/evmone/releases/download/v0.7.0/evmone-0.7.0-darwin-x86_64.tar.gz";
+static constexpr auto evmoneDownloadLink = "https://github.com/ethereum/evmone/releases/download/v0.8.0/evmone-0.8.0-darwin-x86_64.tar.gz";
 static constexpr auto heraFilename = "libhera.dylib";
-static constexpr auto heraDownloadLink = "https://github.com/ewasm/hera/releases/download/v0.3.2-evmc8/hera-0.3.2+commit.dc886eb7-darwin-x86_64.tar.gz";
+static constexpr auto heraDownloadLink = "https://github.com/ewasm/hera/releases/download/v0.5.0/hera-0.5.0-darwin-x86_64.tar.gz";
 #else
 static constexpr auto evmoneFilename = "libevmone.so";
-static constexpr auto evmoneDownloadLink = "https://github.com/ethereum/evmone/releases/download/v0.7.0/evmone-0.7.0-linux-x86_64.tar.gz";
+static constexpr auto evmoneDownloadLink = "https://github.com/ethereum/evmone/releases/download/v0.8.0/evmone-0.8.0-linux-x86_64.tar.gz";
 static constexpr auto heraFilename = "libhera.so";
-static constexpr auto heraDownloadLink = "https://github.com/ewasm/hera/releases/download/v0.3.2-evmc8/hera-0.3.2+commit.dc886eb7-linux-x86_64.tar.gz";
+static constexpr auto heraDownloadLink = "https://github.com/ewasm/hera/releases/download/v0.5.0/hera-0.5.0-linux-x86_64.tar.gz";
 #endif
 
 struct ConfigException : public util::Exception {};
@@ -70,6 +70,7 @@ struct CommonOptions
 
 	langutil::EVMVersion evmVersion() const;
 
+	virtual void addOptions();
 	virtual bool parse(int argc, char const* const* argv);
 	// Throws a ConfigException on error
 	virtual void validate() const;

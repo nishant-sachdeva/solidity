@@ -30,6 +30,7 @@
 #include <libyul/backends/evm/EVMDialect.h>
 #include <libyul/Exceptions.h>
 
+#include <liblangutil/DebugInfoSelection.h>
 #include <liblangutil/EVMVersion.h>
 #include <liblangutil/SourceReferenceFormatter.h>
 
@@ -42,20 +43,6 @@ using namespace solidity::langutil;
 using namespace solidity::yul;
 using namespace solidity::yul::test;
 using namespace solidity::yul::test::yul_fuzzer;
-
-namespace
-{
-void printErrors(ostream& _stream, ErrorList const& _errors)
-{
-	SourceReferenceFormatter formatter(_stream, false, false);
-
-	for (auto const& error: _errors)
-		formatter.printExceptionInformation(
-			*error,
-			(error->type() == Error::Type::Warning) ? "Warning" : "Error"
-		);
-}
-}
 
 DEFINE_PROTO_FUZZER(Program const& _input)
 {
@@ -77,7 +64,8 @@ DEFINE_PROTO_FUZZER(Program const& _input)
 	AssemblyStack stack(
 		version,
 		AssemblyStack::Language::StrictAssembly,
-		solidity::frontend::OptimiserSettings::full()
+		solidity::frontend::OptimiserSettings::full(),
+		DebugInfoSelection::All()
 	);
 
 	// Parse protobuf mutated YUL code
@@ -85,10 +73,16 @@ DEFINE_PROTO_FUZZER(Program const& _input)
 		!stack.parseAndAnalyze("source", yul_source) ||
 		!stack.parserResult()->code ||
 		!stack.parserResult()->analysisInfo ||
-		!Error::containsOnlyWarnings(stack.errors())
+		Error::containsErrors(stack.errors())
 	)
 	{
-		printErrors(std::cout, stack.errors());
+		SourceReferenceFormatter formatter(std::cout, stack, false, false);
+
+		for (auto const& error: stack.errors())
+			formatter.printExceptionInformation(
+				*error,
+				(error->type() == Error::Type::Warning) ? "Warning" : "Error"
+			);
 		yulAssert(false, "Proto fuzzer generated malformed program");
 	}
 

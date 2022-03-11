@@ -957,6 +957,35 @@ bool ExpressionCompiler::visit(FunctionCall const& _functionCall)
 			);
 			break;
 		}
+		case FunctionType::Kind::Wrap:
+		case FunctionType::Kind::Unwrap:
+		{
+			solAssert(arguments.size() == 1, "");
+			Type const* argumentType = arguments.at(0)->annotation().type;
+			Type const* functionCallType = _functionCall.annotation().type;
+			solAssert(argumentType, "");
+			solAssert(functionCallType, "");
+			FunctionType::Kind kind = functionType->kind();
+			if (kind == FunctionType::Kind::Wrap)
+			{
+				solAssert(
+					argumentType->isImplicitlyConvertibleTo(
+						dynamic_cast<UserDefinedValueType const&>(*functionCallType).underlyingType()
+					),
+					""
+				);
+				solAssert(argumentType->isImplicitlyConvertibleTo(*function.parameterTypes()[0]), "");
+			}
+			else
+				solAssert(
+					dynamic_cast<UserDefinedValueType const&>(*argumentType) ==
+					dynamic_cast<UserDefinedValueType const&>(*function.parameterTypes()[0]),
+					""
+				);
+
+			acceptAndConvert(*arguments[0], *function.parameterTypes()[0]);
+			break;
+		}
 		case FunctionType::Kind::BlockHash:
 		{
 			acceptAndConvert(*arguments[0], *function.parameterTypes()[0], true);
@@ -1083,11 +1112,12 @@ bool ExpressionCompiler::visit(FunctionCall const& _functionCall)
 					targetTypes.emplace_back(argument->annotation().type);
 				else if (
 					auto const* literalType = dynamic_cast<StringLiteralType const*>(argument->annotation().type);
-					literalType && literalType->value().size() <= 32
+					literalType && !literalType->value().empty() && literalType->value().size() <= 32
 				)
 					targetTypes.emplace_back(TypeProvider::fixedBytes(static_cast<unsigned>(literalType->value().size())));
 				else
 				{
+					solAssert(!dynamic_cast<RationalNumberType const*>(argument->annotation().type), "");
 					solAssert(argument->annotation().type->isImplicitlyConvertibleTo(*TypeProvider::bytesMemory()), "");
 					targetTypes.emplace_back(TypeProvider::bytesMemory());
 				}
@@ -1730,6 +1760,8 @@ bool ExpressionCompiler::visit(MemberAccess const& _memberAccess)
 			m_context << Instruction::GASPRICE;
 		else if (member == "chainid")
 			m_context << Instruction::CHAINID;
+		else if (member == "basefee")
+			m_context << Instruction::BASEFEE;
 		else if (member == "data")
 			m_context << u256(0) << Instruction::CALLDATASIZE;
 		else if (member == "sig")
@@ -1781,12 +1813,13 @@ bool ExpressionCompiler::visit(MemberAccess const& _memberAccess)
 		else if (member == "min" || member == "max")
 		{
 			MagicType const* arg = dynamic_cast<MagicType const*>(_memberAccess.expression().annotation().type);
-			IntegerType const* integerType = dynamic_cast<IntegerType const*>(arg->typeArgument());
-
-			if (member == "min")
-				m_context << integerType->min();
+			if (IntegerType const* integerType = dynamic_cast<IntegerType const*>(arg->typeArgument()))
+				m_context << (member == "min" ? integerType->min() : integerType->max());
+			else if (EnumType const* enumType = dynamic_cast<EnumType const*>(arg->typeArgument()))
+				m_context << (member == "min" ? enumType->minValue() : enumType->maxValue());
 			else
-				m_context << integerType->max();
+				solAssert(false, "min/max not available for the given type.");
+
 		}
 		else if ((set<string>{"encode", "encodePacked", "encodeWithSelector", "encodeWithSignature", "decode"}).count(member))
 		{
@@ -2079,8 +2112,7 @@ bool ExpressionCompiler::visit(IndexRangeAccess const& _indexAccess)
 	solUnimplementedAssert(
 		arrayType->location() == DataLocation::CallData &&
 		arrayType->isDynamicallySized() &&
-		!arrayType->baseType()->isDynamicallyEncoded(),
-		""
+		!arrayType->baseType()->isDynamicallyEncoded()
 	);
 
 	if (_indexAccess.startExpression())
@@ -2150,6 +2182,10 @@ void ExpressionCompiler::endVisit(Identifier const& _identifier)
 		// no-op
 	}
 	else if (dynamic_cast<EnumDefinition const*>(declaration))
+	{
+		// no-op
+	}
+	else if (dynamic_cast<UserDefinedValueTypeDefinition const*>(declaration))
 	{
 		// no-op
 	}
@@ -2594,9 +2630,21 @@ void ExpressionCompiler::appendExternalFunctionCall(
 	// Check the target contract exists (has code) for non-low-level calls.
 	if (funKind == FunctionType::Kind::External || funKind == FunctionType::Kind::DelegateCall)
 	{
-		m_context << Instruction::DUP1 << Instruction::EXTCODESIZE << Instruction::ISZERO;
-		m_context.appendConditionalRevert(false, "Target contract does not contain code");
-		existenceChecked = true;
+		size_t encodedHeadSize = 0;
+		for (auto const& t: returnTypes)
+			encodedHeadSize += t->decodingType()->calldataHeadSize();
+		// We do not need to check extcodesize if we expect return data, since if there is no
+		// code, the call will return empty data and the ABI decoder will revert.
+		if (
+			encodedHeadSize == 0 ||
+			!haveReturndatacopy ||
+			m_context.revertStrings() >= RevertStrings::Debug
+		)
+		{
+			m_context << Instruction::DUP1 << Instruction::EXTCODESIZE << Instruction::ISZERO;
+			m_context.appendConditionalRevert(false, "Target contract does not contain code");
+			existenceChecked = true;
+		}
 	}
 
 	if (_functionType.gasSet())

@@ -27,6 +27,7 @@
 
 #include <libsolutil/Common.h>
 #include <libsolutil/CommonData.h>
+#include <libsolutil/Numeric.h>
 
 #include <functional>
 #include <memory>
@@ -110,11 +111,14 @@ public:
 	/// Appends an assignment to an immutable variable.
 	virtual void appendImmutableAssignment(std::string const& _identifier) = 0;
 
+	/// Appends data to the very end of the bytecode. Repeated calls concatenate.
+	virtual void appendToAuxiliaryData(bytes const& _data) = 0;
+
 	/// Mark this assembly as invalid. Any attempt to request bytecode from it should throw.
 	virtual void markAsInvalid() = 0;
 };
 
-enum class IdentifierContext { LValue, RValue, VariableDeclaration };
+enum class IdentifierContext { LValue, RValue, VariableDeclaration, NonExternal };
 
 /// Object that is used to resolve references and generate code for access to identifiers external
 /// to inline assembly (not used in standalone assembly mode).

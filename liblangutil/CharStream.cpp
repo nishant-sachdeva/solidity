@@ -45,9 +45,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 /**
- * @author Christian <c@ethdev.com>
- * @date 2014
- * Solidity scanner.
+ * Character stream / input file.
  */
 
 #include <liblangutil/CharStream.h>
@@ -117,4 +115,32 @@ tuple<int, int> CharStream::translatePositionToLineColumn(int _position) const
 		lineStart = lineStart == string::npos ? 0 : lineStart + 1;
 	}
 	return tuple<int, int>(lineNumber, searchPosition - lineStart);
+}
+
+string_view CharStream::text(SourceLocation const& _location) const
+{
+	if (!_location.hasText())
+		return {};
+	solAssert(_location.sourceName && *_location.sourceName == m_name, "");
+	solAssert(static_cast<size_t>(_location.end) <= m_source.size(), "");
+	return string_view{m_source}.substr(
+		static_cast<size_t>(_location.start),
+		static_cast<size_t>(_location.end - _location.start)
+	);
+}
+
+string CharStream::singleLineSnippet(string const& _sourceCode, SourceLocation const& _location)
+{
+	if (!_location.hasText())
+		return {};
+
+	if (static_cast<size_t>(_location.start) >= _sourceCode.size())
+		return {};
+
+	string cut = _sourceCode.substr(static_cast<size_t>(_location.start), static_cast<size_t>(_location.end - _location.start));
+	auto newLinePos = cut.find_first_of("\n\r");
+	if (newLinePos != string::npos)
+		cut = cut.substr(0, newLinePos) + "...";
+
+	return cut;
 }

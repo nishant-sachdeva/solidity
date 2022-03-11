@@ -41,7 +41,7 @@ using namespace solidity::util;
 bool SyntaxChecker::checkSyntax(ASTNode const& _astRoot)
 {
 	_astRoot.accept(*this);
-	return Error::containsOnlyWarnings(m_errorReporter.errors());
+	return !Error::containsErrors(m_errorReporter.errors());
 }
 
 bool SyntaxChecker::visit(SourceUnit const& _sourceUnit)
@@ -68,7 +68,7 @@ void SyntaxChecker::endVisit(SourceUnit const& _sourceUnit)
 				string(";\"");
 
 		// when reporting the warning, print the source name only
-		m_errorReporter.warning(3420_error, {-1, -1, _sourceUnit.location().source}, errorString);
+		m_errorReporter.warning(3420_error, {-1, -1, _sourceUnit.location().sourceName}, errorString);
 	}
 	if (!m_sourceUnit->annotation().useABICoderV2.set())
 		m_sourceUnit->annotation().useABICoderV2 = true;

@@ -41,7 +41,6 @@ bool SemanticInformation::breaksCSEAnalysisBlock(AssemblyItem const& _item, bool
 	case VerbatimBytecode:
 		return true;
 	case Push:
-	case PushString:
 	case PushTag:
 	case PushSub:
 	case PushSubSize:
@@ -353,6 +352,7 @@ bool SemanticInformation::invalidInPureFunctions(Instruction _instruction)
 	case Instruction::CALLER:
 	case Instruction::CALLVALUE:
 	case Instruction::CHAINID:
+	case Instruction::BASEFEE:
 	case Instruction::GAS:
 	case Instruction::GASPRICE:
 	case Instruction::EXTCODESIZE:

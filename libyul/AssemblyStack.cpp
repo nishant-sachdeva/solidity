@@ -36,8 +36,6 @@
 #include <libyul/ObjectParser.h>
 #include <libyul/optimiser/Suite.h>
 
-#include <libsolidity/interface/OptimiserSettings.h>
-
 #include <libevmasm/Assembly.h>
 #include <liblangutil/Scanner.h>
 #include <optional>
@@ -65,21 +63,45 @@ Dialect const& languageToDialect(AssemblyStack::Language _language, EVMVersion _
 	return Dialect::yulDeprecated();
 }
 
+// Duplicated from libsolidity/codegen/CompilerContext.cpp
+// TODO: refactor and remove duplication
+evmasm::Assembly::OptimiserSettings translateOptimiserSettings(
+	frontend::OptimiserSettings const& _settings,
+	langutil::EVMVersion _evmVersion
+)
+{
+	// Constructing it this way so that we notice changes in the fields.
+	evmasm::Assembly::OptimiserSettings asmSettings{false, false,  false, false, false, false, false, _evmVersion, 0};
+	asmSettings.isCreation = true;
+	asmSettings.runInliner = _settings.runInliner;
+	asmSettings.runJumpdestRemover = _settings.runJumpdestRemover;
+	asmSettings.runPeephole = _settings.runPeephole;
+	asmSettings.runDeduplicate = _settings.runDeduplicate;
+	asmSettings.runCSE = _settings.runCSE;
+	asmSettings.runConstantOptimiser = _settings.runConstantOptimiser;
+	asmSettings.expectedExecutionsPerDeployment = _settings.expectedExecutionsPerDeployment;
+	asmSettings.evmVersion = _evmVersion;
+
+	return asmSettings;
+}
+
 }
 
 
-Scanner const& AssemblyStack::scanner() const
+CharStream const& AssemblyStack::charStream(string const& _sourceName) const
 {
-	yulAssert(m_scanner, "");
-	return *m_scanner;
+	yulAssert(m_charStream, "");
+	yulAssert(m_charStream->name() == _sourceName, "");
+	return *m_charStream;
 }
 
 bool AssemblyStack::parseAndAnalyze(std::string const& _sourceName, std::string const& _source)
 {
 	m_errors.clear();
 	m_analysisSuccessful = false;
-	m_scanner = make_shared<Scanner>(CharStream(_source, _sourceName));
-	m_parserResult = ObjectParser(m_errorReporter, languageToDialect(m_language, m_evmVersion)).parse(m_scanner, false);
+	m_charStream = make_unique<CharStream>(_source, _sourceName);
+	shared_ptr<Scanner> scanner = make_shared<Scanner>(*m_charStream);
+	m_parserResult = ObjectParser(m_errorReporter, languageToDialect(m_language, m_evmVersion)).parse(scanner, false);
 	if (!m_errorReporter.errors().empty())
 		return false;
 	yulAssert(m_parserResult, "");
@@ -112,7 +134,8 @@ void AssemblyStack::translate(AssemblyStack::Language _targetLanguage)
 	);
 
 	*m_parserResult = EVMToEwasmTranslator(
-		languageToDialect(m_language, m_evmVersion)
+		languageToDialect(m_language, m_evmVersion),
+		*this
 	).run(*parserResult());
 
 	m_language = _targetLanguage;
@@ -216,7 +239,42 @@ MachineAssemblyObject AssemblyStack::assemble(Machine _machine) const
 	return MachineAssemblyObject();
 }
 
-std::pair<MachineAssemblyObject, MachineAssemblyObject> AssemblyStack::assembleWithDeployed(optional<string_view> _deployName) const
+std::pair<MachineAssemblyObject, MachineAssemblyObject>
+AssemblyStack::assembleWithDeployed(optional<string_view> _deployName) const
+{
+	auto [creationAssembly, deployedAssembly] = assembleEVMWithDeployed(_deployName);
+	yulAssert(creationAssembly, "");
+	yulAssert(m_charStream, "");
+
+	MachineAssemblyObject creationObject;
+	creationObject.bytecode = make_shared<evmasm::LinkerObject>(creationAssembly->assemble());
+	yulAssert(creationObject.bytecode->immutableReferences.empty(), "Leftover immutables.");
+	creationObject.assembly = creationAssembly->assemblyString(m_debugInfoSelection);
+	creationObject.sourceMappings = make_unique<string>(
+		evmasm::AssemblyItem::computeSourceMapping(
+			creationAssembly->items(),
+			{{m_charStream->name(), 0}}
+		)
+	);
+
+	MachineAssemblyObject deployedObject;
+	if (deployedAssembly)
+	{
+		deployedObject.bytecode = make_shared<evmasm::LinkerObject>(deployedAssembly->assemble());
+		deployedObject.assembly = deployedAssembly->assemblyString(m_debugInfoSelection);
+		deployedObject.sourceMappings = make_unique<string>(
+			evmasm::AssemblyItem::computeSourceMapping(
+				deployedAssembly->items(),
+				{{m_charStream->name(), 0}}
+			)
+		);
+	}
+
+	return {std::move(creationObject), std::move(deployedObject)};
+}
+
+std::pair<std::shared_ptr<evmasm::Assembly>, std::shared_ptr<evmasm::Assembly>>
+AssemblyStack::assembleEVMWithDeployed(optional<string_view> _deployName) const
 {
 	yulAssert(m_analysisSuccessful, "");
 	yulAssert(m_parserResult, "");
@@ -227,18 +285,8 @@ std::pair<MachineAssemblyObject, MachineAssemblyObject> AssemblyStack::assembleW
 	EthAssemblyAdapter adapter(assembly);
 	compileEVM(adapter, m_optimiserSettings.optimizeStackAllocation);
 
-	MachineAssemblyObject creationObject;
-	creationObject.bytecode = make_shared<evmasm::LinkerObject>(assembly.assemble());
-	yulAssert(creationObject.bytecode->immutableReferences.empty(), "Leftover immutables.");
-	creationObject.assembly = assembly.assemblyString();
-	creationObject.sourceMappings = make_unique<string>(
-		evmasm::AssemblyItem::computeSourceMapping(
-			assembly.items(),
-			{{scanner().charStream() ? scanner().charStream()->name() : "", 0}}
-		)
-	);
+	assembly.optimise(translateOptimiserSettings(m_optimiserSettings, m_evmVersion));
 
-	MachineAssemblyObject deployedObject;
 	optional<size_t> subIndex;
 
 	// Pick matching assembly if name was given
@@ -260,24 +308,19 @@ std::pair<MachineAssemblyObject, MachineAssemblyObject> AssemblyStack::assembleW
 	if (subIndex.has_value())
 	{
 		evmasm::Assembly& runtimeAssembly = assembly.sub(*subIndex);
-		deployedObject.bytecode = make_shared<evmasm::LinkerObject>(runtimeAssembly.assemble());
-		deployedObject.assembly = runtimeAssembly.assemblyString();
-		deployedObject.sourceMappings = make_unique<string>(
-			evmasm::AssemblyItem::computeSourceMapping(
-				runtimeAssembly.items(),
-				{{scanner().charStream() ? scanner().charStream()->name() : "", 0}}
-			)
-		);
+		return {make_shared<evmasm::Assembly>(assembly), make_shared<evmasm::Assembly>(runtimeAssembly)};
 	}
 
-	return {std::move(creationObject), std::move(deployedObject)};
+	return {make_shared<evmasm::Assembly>(assembly), {}};
 }
 
-string AssemblyStack::print() const
+string AssemblyStack::print(
+	CharStreamProvider const* _soliditySourceProvider
+) const
 {
 	yulAssert(m_parserResult, "");
 	yulAssert(m_parserResult->code, "");
-	return m_parserResult->toString(&languageToDialect(m_language, m_evmVersion)) + "\n";
+	return m_parserResult->toString(&languageToDialect(m_language, m_evmVersion), m_debugInfoSelection, _soliditySourceProvider) + "\n";
 }
 
 shared_ptr<Object> AssemblyStack::parserResult() const

@@ -31,6 +31,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 using namespace std;
@@ -131,7 +132,7 @@ map<string, Builtin> SemanticTest::makeBuiltins()
 			"isoltest_builtin_test",
 			[](FunctionCall const&) -> optional<bytes>
 			{
-				return util::toBigEndian(u256(0x1234));
+				return toBigEndian(u256(0x1234));
 			}
 		},
 		{
@@ -139,7 +140,7 @@ map<string, Builtin> SemanticTest::makeBuiltins()
 			[](FunctionCall const& _call) -> optional<bytes>
 			{
 				if (_call.arguments.parameters.empty())
-					return util::toBigEndian(0);
+					return toBigEndian(0);
 				else
 					return _call.arguments.rawBytes();
 			}
@@ -154,7 +155,7 @@ map<string, Builtin> SemanticTest::makeBuiltins()
 					address = h160(_call.arguments.parameters.at(0).rawString);
 				else
 					address = m_contractAddress;
-				return util::toBigEndian(balanceAt(address));
+				return toBigEndian(balanceAt(address));
 			}
 		},
 		{
@@ -383,7 +384,13 @@ TestCase::TestResult SemanticTest::runTest(
 			soltestAssert(
 				deploy(test.call().signature, 0, {}, libraries) && m_transactionSuccessful,
 				"Failed to deploy library " + test.call().signature);
-			libraries[test.call().signature] = m_contractAddress;
+			// For convenience, in semantic tests we assume that an unqualified name like `L` is equivalent to one
+			// with an empty source unit name (`:L`). This is fine because the compiler never uses unqualified
+			// names in the Yul code it produces and does not allow `linkersymbol()` at all in inline assembly.
+			if (test.call().signature.find(':') == string::npos)
+				libraries[":" + test.call().signature] = m_contractAddress;
+			else
+				libraries[test.call().signature] = m_contractAddress;
 			continue;
 		}
 		else

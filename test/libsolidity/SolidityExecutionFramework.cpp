@@ -21,17 +21,22 @@
  * Framework for executing Solidity contracts and testing them against C++ implementation.
  */
 
-#include <cstdlib>
-#include <iostream>
-#include <boost/test/framework.hpp>
 #include <test/libsolidity/SolidityExecutionFramework.h>
+
+#include <liblangutil/DebugInfoSelection.h>
 #include <liblangutil/Exceptions.h>
 #include <liblangutil/SourceReferenceFormatter.h>
 
+#include <boost/test/framework.hpp>
+
+#include <cstdlib>
+#include <iostream>
+
 using namespace solidity;
-using namespace solidity::test;
 using namespace solidity::frontend;
 using namespace solidity::frontend::test;
+using namespace solidity::langutil;
+using namespace solidity::test;
 using namespace std;
 
 bytes SolidityExecutionFramework::multiSourceCompileContract(
@@ -65,10 +70,8 @@ bytes SolidityExecutionFramework::multiSourceCompileContract(
 			for (auto const& error: m_compiler.errors())
 				if (error->type() == langutil::Error::Type::CodeGenerationError)
 					BOOST_THROW_EXCEPTION(*error);
-		langutil::SourceReferenceFormatter formatter(std::cerr, true, false);
-
-		for (auto const& error: m_compiler.errors())
-			formatter.printErrorInformation(*error);
+		langutil::SourceReferenceFormatter{std::cerr, m_compiler, true, false}
+			.printErrorInformation(m_compiler.errors());
 		BOOST_ERROR("Compiling contract failed");
 	}
 	string contractName(_contractName.empty() ? m_compiler.lastContractName(_mainSourceName) : _contractName);
@@ -93,8 +96,12 @@ bytes SolidityExecutionFramework::multiSourceCompileContract(
 				else if (forceEnableOptimizer)
 					optimiserSettings = OptimiserSettings::full();
 
-				yul::AssemblyStack
-					asmStack(m_evmVersion, yul::AssemblyStack::Language::StrictAssembly, optimiserSettings);
+				yul::AssemblyStack asmStack(
+					m_evmVersion,
+					yul::AssemblyStack::Language::StrictAssembly,
+					optimiserSettings,
+					DebugInfoSelection::All()
+				);
 				bool analysisSuccessful = asmStack.parseAndAnalyze("", m_compiler.yulIROptimized(contractName));
 				solAssert(analysisSuccessful, "Code that passed analysis in CompilerStack can't have errors");
 

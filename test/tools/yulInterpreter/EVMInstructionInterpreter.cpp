@@ -29,6 +29,9 @@
 #include <libevmasm/Instruction.h>
 
 #include <libsolutil/Keccak256.h>
+#include <libsolutil/Numeric.h>
+
+#include <limits>
 
 using namespace std;
 using namespace solidity;
@@ -220,6 +223,8 @@ u256 EVMInstructionInterpreter::eval(
 		return m_state.gasprice;
 	case Instruction::CHAINID:
 		return m_state.chainid;
+	case Instruction::BASEFEE:
+		return m_state.basefee;
 	case Instruction::EXTCODESIZE:
 		return u256(keccak256(h256(arg[0]))) & 0xffffff;
 	case Instruction::EXTCODEHASH:
@@ -509,7 +514,7 @@ void EVMInstructionInterpreter::logTrace(std::string const& _pseudoInstruction, 
 {
 	string message = _pseudoInstruction + "(";
 	for (size_t i = 0; i < _arguments.size(); ++i)
-		message += (i > 0 ? ", " : "") + util::formatNumber(_arguments[i]);
+		message += (i > 0 ? ", " : "") + formatNumber(_arguments[i]);
 	message += ")";
 	if (!_data.empty())
 		message += " [" + util::toHex(_data) + "]";
